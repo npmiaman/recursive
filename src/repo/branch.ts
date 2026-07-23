@@ -212,6 +212,42 @@ export function upsertPullRequest(
   return { number: match ? Number(match[1]) : 0, url, created: true };
 }
 
+/**
+ * Merge a PR, for autonomous ("auto-PR") mode.
+ *
+ * This is the one action Recursive will not take unless a human explicitly turns
+ * it on, because it is the step that puts an unreviewed change into the base
+ * branch. When enabled, the safety that remains is upstream, not here: the
+ * repair only reaches this point after the closed loop verified it against the
+ * real user journey, and branch protection or required checks on the repo (if
+ * configured) still gate the merge. `--squash` keeps the base-branch history one
+ * commit per fix rather than a chain of cycle commits.
+ *
+ * Returns true if the merge went through. A blocked merge (protected branch,
+ * failing required check) is reported, not thrown, so autonomous runs downgrade
+ * to "PR opened, awaiting a human" rather than crashing.
+ */
+export function mergePullRequest(
+  repoPath: string,
+  prNumber: number,
+  method: "squash" | "merge" | "rebase" = "squash",
+): { merged: boolean; note: string } {
+  try {
+    execFileSync("gh", ["pr", "merge", String(prNumber), `--${method}`, "--delete-branch"], {
+      cwd: repoPath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { merged: true, note: `merged PR #${prNumber} (${method})` };
+  } catch (error) {
+    const e = error as { stderr?: string; message?: string };
+    return {
+      merged: false,
+      note: `could not merge PR #${prNumber}: ${(e.stderr || e.message || "unknown").trim().split("\n")[0]}`,
+    };
+  }
+}
+
 /** Append a comment to an existing PR, how additional fixes announce themselves. */
 export function commentOnPullRequest(repoPath: string, prNumber: number, body: string): void {
   try {

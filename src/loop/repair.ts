@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolveFixer } from "../agents/fixers/index.ts";
 import { Retriever, type RetrievedContext } from "../retrieve/index.ts";
 import { classifyFile } from "../repo/areas.ts";
-import { checkoutAreaBranch, push, upsertPullRequest, hasRemote } from "../repo/branch.ts";
+import { checkoutAreaBranch, push, upsertPullRequest, mergePullRequest, hasRemote } from "../repo/branch.ts";
 import { Repo } from "../repo/git.ts";
 import { append } from "../memory/store.ts";
 import { recall } from "../memory/recall.ts";
@@ -54,6 +54,14 @@ export interface RepairOptions {
   /** Open/refresh a pull request when the repair verifies. Default true. */
   openPr?: boolean;
   /**
+   * Auto-PR mode: merge the pull request as well, not just open it. Off by
+   * default. This is the only step that lands a change without a human, so it is
+   * opt-in and relies on the closed-loop verification plus repo branch
+   * protection as its safety net.
+   */
+  autoMerge?: boolean;
+  mergeMethod?: "squash" | "merge" | "rebase";
+  /**
    * Files the agent may edit. Passed straight through to the coding agent to
    * stop a "fix" that deletes the feature instead of repairing it.
    */
@@ -67,6 +75,8 @@ export interface RepairResult {
   loop: ClosedLoopResult;
   branch?: string;
   prUrl?: string;
+  /** True if auto-PR mode merged it. */
+  merged?: boolean;
   /** Commits made across all cycles that were kept. */
   commits: string[];
 }
@@ -295,6 +305,7 @@ export async function repairFlow(options: RepairOptions): Promise<RepairResult> 
   // Only on success, and only ever as a PR. Tier 1 stops at "a human has
   // something good to merge", auto-deploy is deliberately not in scope.
   let prUrl: string | undefined;
+  let merged = false;
   if (loop.resolved && branch && commits.length && !options.dryRun && options.openPr !== false) {
     if (hasRemote(options.repoPath)) {
       push(options.repoPath, branch);
@@ -318,10 +329,20 @@ export async function repairFlow(options: RepairOptions): Promise<RepairResult> 
       );
       prUrl = pr?.url;
       if (prUrl) log(`  PR: ${prUrl}`);
+
+      // Auto-PR mode: merge it too. Off unless explicitly enabled, because this
+      // is the step that lands an unreviewed change. The verification upstream
+      // (real journey + postconditions + backend) is what makes it defensible;
+      // branch protection on the repo is the backstop if it is not.
+      if (options.autoMerge && pr) {
+        const outcome = mergePullRequest(options.repoPath, pr.number, options.mergeMethod ?? "squash");
+        merged = outcome.merged;
+        log(`  ${outcome.note}`);
+      }
     } else {
       log(` no git remote, commits are on ${branch}, push manually to open a PR`);
     }
   }
 
-  return { flowId: options.flow.id, loop, branch, prUrl, commits };
+  return { flowId: options.flow.id, loop, branch, prUrl, merged, commits };
 }

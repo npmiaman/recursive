@@ -80,6 +80,8 @@ REPAIR. Tier 1: change the code until the flow actually passes
                         --base REF branch to base off / target (default main)
                         --only PATHS comma-separated paths the agent may edit
                         --no-pr commit to the area branch, don't open a PR
+                        --auto-merge      AUTO-PR: merge the PR too, not just open it
+                        --merge-method M  squash (default) | merge | rebase
                         --dry-run diagnose and verify, change nothing
 
 MEMORY, permanent, per-project, never deleted
@@ -494,6 +496,8 @@ async function cmdSweep(): Promise<void> {
           headless: !flag("watch"),
           baseBranch: arg("base"),
           openPr: !flag("no-pr"),
+          autoMerge: flag("auto-merge"),
+          mergeMethod: (arg("merge-method") as "squash" | "merge" | "rebase") ?? undefined,
           dryRun: flag("dry-run"),
           onProgress: (l) => console.log(l),
         });
@@ -563,6 +567,8 @@ async function cmdRepair(): Promise<void> {
       .map((p) => p.trim())
       .filter(Boolean),
     openPr: !flag("no-pr"),
+    autoMerge: flag("auto-merge"),
+    mergeMethod: (arg("merge-method") as "squash" | "merge" | "rebase") ?? undefined,
     dryRun: flag("dry-run"),
     onProgress: (l) => console.log(l),
   });

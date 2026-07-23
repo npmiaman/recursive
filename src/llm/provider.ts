@@ -23,6 +23,34 @@ import { RateLimiter, withRetry, parseRetryAfter, type RetryableError } from "./
  * everything else, including models running on the customer's own hardware.
  */
 
+// ---- tool-calling wire types (OpenAI-compatible) --------------------------
+
+/** A message in an OpenAI-format chat, including tool calls and tool results. */
+export interface ChatMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+export interface ToolSpec {
+  type: "function";
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}
+
+interface RawAssistantMessage extends ChatMessage {
+  role: "assistant";
+  tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[];
+}
+
+export interface AssistantTurn {
+  content: string | null;
+  toolCalls: { id: string; name: string; argumentsRaw: string }[];
+  /** The raw assistant message, to append to history verbatim. */
+  raw: ChatMessage;
+}
+
 export interface LLMProvider {
   readonly name: string;
   /** True if no request leaves the customer's network. */
@@ -101,6 +129,75 @@ export class OpenAICompatibleProvider implements LLMProvider {
     // own infrastructure, which is the case this path mainly exists for.
     this.selfHosted = !/api\.openai\.com/.test(this.baseUrl);
     this.name = this.selfHosted ? `openai-compatible (${this.baseUrl})` : "openai";
+  }
+
+  /**
+   * One turn of a tool-calling conversation.
+   *
+   * This is the primitive the agentic coding loop is built on. Unlike
+   * `structured()`, which is a single request/response, this takes the whole
+   * running message history plus the tool schemas and returns the model's next
+   * move: either final text, or a batch of tool calls to execute. The loop that
+   * drives it lives in src/agents/coding.
+   *
+   * Deliberately on the OpenAI-compatible class rather than the LLMProvider
+   * interface: tool-calling wire formats differ between vendors, and the agentic
+   * engine already requires an OpenAI-compatible endpoint (which is what NVIDIA,
+   * Ollama, vLLM and OpenAI all speak).
+   */
+  async toolChat(
+    messages: ChatMessage[],
+    tools: ToolSpec[],
+    options: { maxTokens?: number } = {},
+  ): Promise<AssistantTurn> {
+    const payload = await withRetry(
+      async () => {
+        await this.limiter.acquire();
+        const response = await fetch(`${this.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+          },
+          body: JSON.stringify({
+            model: this.model,
+            messages,
+            tools,
+            tool_choice: "auto",
+            max_tokens: options.maxTokens ?? 8000,
+          }),
+        });
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          const error: RetryableError = new Error(
+            `${this.name} returned ${response.status}: ${body.slice(0, 300)}`,
+          );
+          error.status = response.status;
+          error.retryAfterSeconds = parseRetryAfter(response.headers.get("retry-after"));
+          throw error;
+        }
+        return (await response.json()) as {
+          choices?: { message?: RawAssistantMessage }[];
+        };
+      },
+      { maxRetries: this.maxRetries },
+    );
+
+    const message = payload.choices?.[0]?.message;
+    return {
+      content: message?.content ?? null,
+      toolCalls: (message?.tool_calls ?? []).map((call) => ({
+        id: call.id,
+        name: call.function.name,
+        // Arguments arrive as a JSON string; leave parsing to the caller so a
+        // malformed call can be reported back to the model rather than crashing.
+        argumentsRaw: call.function.arguments ?? "{}",
+      })),
+      // Round-trip the raw message so the caller can append it verbatim, which
+      // is required: the follow-up tool results must reference the exact
+      // tool_call ids the model emitted.
+      raw: message ?? { role: "assistant", content: "" },
+    };
   }
 
   async structured<T extends z.ZodType>(
