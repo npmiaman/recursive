@@ -67,4 +67,4 @@ export interface Fixer {
 }
 
 /** Which engines exist. Per-project, chosen by the customer. */
-export type FixEngine = "claude-agent-sdk" | "openhands";
+export type FixEngine = "claude-agent-sdk" | "openhands" | "native";

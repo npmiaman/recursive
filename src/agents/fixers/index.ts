@@ -1,11 +1,13 @@
 import { config } from "../../config.ts";
 import { ClaudeAgentFixer } from "./claude.ts";
 import { OpenHandsFixer } from "./openhands.ts";
+import { NativeProviderFixer } from "./native.ts";
 import type { FixEngine, Fixer } from "./types.ts";
 
 export type { FixAttempt, FixEngine, Fixer, FixRequest } from "./types.ts";
 export { ClaudeAgentFixer } from "./claude.ts";
 export { OpenHandsFixer } from "./openhands.ts";
+export { NativeProviderFixer } from "./native.ts";
 
 /**
  * Engine selection.
@@ -25,6 +27,8 @@ export function resolveFixer(engine?: FixEngine): Fixer {
         baseUrl: config.openHandsBaseUrl,
         apiKeyEnv: "LLM_API_KEY",
       });
+    case "native":
+      return new NativeProviderFixer();
     case "claude-agent-sdk":
       return new ClaudeAgentFixer();
     default: {
@@ -43,7 +47,11 @@ export function describeEngines(): {
   selfContained: boolean;
   active: boolean;
 }[] {
-  return [new ClaudeAgentFixer(), new OpenHandsFixer({ model: config.openHandsModel })].map(
+  return [
+    new ClaudeAgentFixer(),
+    new OpenHandsFixer({ model: config.openHandsModel }),
+    new NativeProviderFixer(),
+  ].map(
     (fixer) => ({
       name: fixer.name,
       licence: fixer.licence,
