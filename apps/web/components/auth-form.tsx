@@ -50,17 +50,32 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(signup ? { email, password, name, code } : { email, password }),
       });
-      const data = (await response.json()) as { error?: string };
+
+      // A 500 from a misconfigured server (e.g. no database yet) is not JSON, so
+      // parse defensively and report the real status instead of pretending the
+      // network failed.
+      let data: { error?: string } = {};
+      try {
+        data = (await response.json()) as { error?: string };
+      } catch {
+        /* non-JSON response */
+      }
 
       if (!response.ok) {
-        setError(data.error ?? "Something went wrong. Try again.");
+        setError(
+          data.error ??
+            (response.status >= 500
+              ? `Server error (${response.status}). The dashboard may not be finished setting up.`
+              : "Something went wrong. Try again."),
+        );
         return;
       }
-      // refresh() so server components re-render with the new session cookie, // without it the dashboard renders from the signed-out cache.
+      // refresh() so server components re-render with the new session cookie,
+      // without it the dashboard renders from the signed-out cache.
       router.push(next);
       router.refresh();
     } catch {
-      setError("Could not reach the server.");
+      setError("Could not reach the server (network error).");
     } finally {
       setPending(false);
     }
