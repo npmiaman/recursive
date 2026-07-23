@@ -72,6 +72,8 @@ SWEEP, browsing-agent regression runs (rhai)
                         --repair fix what breaks, don't just report it
 
 REPAIR. Tier 1: change the code until the flow actually passes
+ doctor              Check every subsystem works against a codebase (run this first).
+                        --repo PATH       codebase to check
  repair FLOW_ID      Fix a failing flow, verifying after every change by
  re-running the real user journey AND checking the server.
                       Loops until it passes or it can honestly say it is stuck.
@@ -233,6 +235,160 @@ async function cmdFix(): Promise<void> {
 
 async function cmdVerify(): Promise<void> {
   await verify({ force: flag("force") });
+}
+
+/**
+ * `recursive doctor`, a capability self-check.
+ *
+ * Answers one question: is every subsystem Recursive depends on actually
+ * working, here, against this codebase? Each check runs the real code path (not
+ * a mock) and reports pass, warn, or fail with a concrete detail. Run it after
+ * pointing Recursive at a new repository, before trusting a sweep.
+ */
+async function cmdDoctor(): Promise<void> {
+  const repoPath = arg("repo") ?? config.targetRepoPath ?? ".";
+  const project = resolveProject(arg("project"));
+
+  type Status = "pass" | "warn" | "fail";
+  const results: { name: string; status: Status; detail: string }[] = [];
+  const add = (name: string, status: Status, detail: string) => results.push({ name, status, detail });
+  const run = async (name: string, fn: () => Promise<[Status, string]>) => {
+    try {
+      const [status, detail] = await fn();
+      add(name, status, detail);
+    } catch (error) {
+      add(name, "fail", error instanceof Error ? (error.message.split("\n")[0] ?? error.message) : String(error));
+    }
+  };
+
+  console.log(`\nRecursive doctor, checking ${repoPath} (project ${project.id})\n`);
+
+  // 1. Reasoning model reachable.
+  await run("reasoning model", async () => {
+    const { resolveProvider, describeProvider } = await import("./llm/provider.ts");
+    await resolveProvider().preflight();
+    const d = describeProvider();
+    return ["pass", `${d.name} - ${d.model}`];
+  });
+
+  // 2. Code-editing engine ready. The Claude engine only warns when its key is
+  //    missing (login profiles also count), so check the credential explicitly
+  //    rather than trusting a soft preflight.
+  await run("fix engine", async () => {
+    const { resolveFixer } = await import("./agents/fixers/index.ts");
+    const fixer = resolveFixer();
+    await fixer.preflight();
+    if (
+      fixer.name === "claude-agent-sdk" &&
+      !process.env["ANTHROPIC_API_KEY"] &&
+      !process.env["ANTHROPIC_AUTH_TOKEN"] &&
+      !process.env["ANTHROPIC_PROFILE"]
+    ) {
+      return ["warn", "claude-agent-sdk selected but no Anthropic credential; set FIX_ENGINE=agentic to use your LLM_PROVIDER model"];
+    }
+    return ["pass", `${fixer.name} ready`];
+  });
+
+  // 3. Browser (the sweep's eyes).
+  await run("headless browser", async () => {
+    const { enginePreflight } = await import("./sweep/engine.ts");
+    const r = await enginePreflight("internal");
+    return r.ok ? ["pass", "Chromium launches"] : ["fail", r.reason ?? "unavailable"];
+  });
+
+  // 4. Target is a real git checkout (the change oracle).
+  await run("git repository", async () => {
+    const { Repo } = await import("./repo/git.ts");
+    const repo = new Repo(repoPath);
+    if (!repo.isRepo()) return ["fail", "not a git repository"];
+    const dirty = repo.dirtyFiles().length;
+    return dirty === 0
+      ? ["pass", `clean at ${repo.currentBranch()}`]
+      : ["warn", `${dirty} uncommitted file(s); the repair loop reverts by hard-reset`];
+  });
+
+  // 5. Flow manifest (what the sweep exercises).
+  let manifest: import("./sweep/flows.ts").FlowManifest | undefined;
+  await run("flow manifest", async () => {
+    manifest = loadFlows(repoPath);
+    if (!manifest) return ["warn", "no recursive.flows.json; run `sweep init` to create one"];
+    const critical = manifest.flows.filter((f) => f.critical).length;
+    return ["pass", `${manifest.flows.length} flow(s), ${critical} critical`];
+  });
+
+  // 6. Base memory (does it know this codebase yet).
+  await run("base memory", async () => {
+    const { baseMemoryStats } = await import("./memory/base.ts");
+    const s = baseMemoryStats(project.id);
+    if (s.files === 0) return ["warn", "not indexed; run `memory index`"];
+    return ["pass", `${s.files} file(s), ${s.enriched} with model summaries`];
+  });
+
+  // 7. Retrieval builds an index over the repo.
+  await run("retrieval", async () => {
+    const { Retriever } = await import("./retrieve/index.ts");
+    const r = new Retriever(repoPath, project.id);
+    const stats = r.build();
+    return stats.chunks > 0
+      ? ["pass", `${stats.files} file(s) - ${stats.chunks} chunk(s)`]
+      : ["fail", "indexed zero chunks"];
+  });
+
+  // 8. Memory store is writable and readable (append-only round-trip).
+  await run("memory store", async () => {
+    const { append } = await import("./memory/store.ts");
+    const { recall } = await import("./memory/recall.ts");
+    const probeId = `doctor-${project.id}`;
+    const probe: import("./memory/types.ts").FailureRecord = {
+      type: "failure",
+      id: "",
+      projectId: probeId,
+      at: new Date().toISOString(),
+      fingerprint: "doctor:probe",
+      signalClass: "doctor",
+      route: "/doctor",
+      message: "doctor write probe",
+      implicatedFiles: [],
+    };
+    append(probe);
+    const back = recall({
+      projectId: probeId,
+      fingerprint: "doctor:probe",
+      signalClass: "doctor",
+      route: "/doctor",
+      message: "doctor write probe",
+      implicatedFiles: [],
+    });
+    return back.cases.length > 0 ? ["pass", "append and recall work"] : ["fail", "wrote but could not read back"];
+  });
+
+  // 9. Backend trace endpoint (how "did the backend really work" is answered).
+  await run("backend trace", async () => {
+    if (!manifest?.backendTraceUrl) return ["warn", "no backendTraceUrl in flows.json; backend checks limited to postconditions"];
+    const token = manifest.backendTokenEnv ? process.env[manifest.backendTokenEnv] : undefined;
+    const res = await fetch(manifest.backendTraceUrl, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+      signal: AbortSignal.timeout(5000),
+    }).catch((e) => {
+      throw new Error(`unreachable: ${e instanceof Error ? e.message : e}`);
+    });
+    return res.ok ? ["pass", `reachable (${res.status})`] : ["fail", `returned ${res.status}`];
+  });
+
+  // ---- report ----
+  const mark = (s: Status) => (s === "pass" ? "✓" : s === "warn" ? "!" : "✗");
+  const width = Math.max(...results.map((r) => r.name.length));
+  for (const r of results) {
+    console.log(`  ${mark(r.status)} ${r.name.padEnd(width)}  ${r.detail}`);
+  }
+  const fails = results.filter((r) => r.status === "fail").length;
+  const warns = results.filter((r) => r.status === "warn").length;
+  console.log(
+    `\n  ${results.length - fails - warns} passing, ${warns} warning(s), ${fails} failing.` +
+      (fails ? " Fix the failing checks before running a sweep." : " Ready.") +
+      "\n",
+  );
+  if (fails) process.exitCode = 1;
 }
 
 async function cmdStatus(): Promise<void> {
@@ -891,6 +1047,9 @@ async function main(): Promise<void> {
       return cmdFix();
     case "verify":
       return cmdVerify();
+    case "doctor":
+      await cmdDoctor();
+      break;
     case "status":
       return cmdStatus();
     default:
