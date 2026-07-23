@@ -98,6 +98,59 @@ class AnthropicProvider implements LLMProvider {
 // ------------------------------------------------- OpenAI-compatible
 
 /**
+ * Pull a JSON object out of a model's text response, tolerantly.
+ *
+ * Returns the parsed value, or undefined if nothing in the text parses. Models
+ * wrap JSON in code fences, prepend a stray token, or emit reasoning before the
+ * object; this tries the cheap whole-slice first, then walks each `{` and
+ * attempts a brace-balanced parse from there, so a leading malformation does not
+ * doom an otherwise-valid object later in the string.
+ */
+export function extractJson(text: string): unknown {
+  const cleaned = text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
+
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
+  if (first !== -1 && last > first) {
+    try {
+      return JSON.parse(cleaned.slice(first, last + 1));
+    } catch {
+      /* fall through to the per-brace scan */
+    }
+  }
+
+  // Try each opening brace as the start of a balanced object.
+  for (let i = 0; i < cleaned.length; i++) {
+    if (cleaned[i] !== "{") continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let j = i; j < cleaned.length; j++) {
+      const ch = cleaned[j];
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = !inString;
+      } else if (!inString && ch === "{") {
+        depth++;
+      } else if (!inString && ch === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            return JSON.parse(cleaned.slice(i, j + 1));
+          } catch {
+            break; // this opener does not yield valid JSON; try the next one
+          }
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
  * Any endpoint speaking the OpenAI chat-completions shape.
  *
  * Covers OpenAI itself, and, more importantly for us. Ollama, vLLM, LM Studio,
@@ -220,61 +273,64 @@ export class OpenAICompatibleProvider implements LLMProvider {
         JSON.stringify(jsonSchema),
     });
 
-    const payload = await withRetry(
-      async () => {
-        // Pace INSIDE the retried function so a retry also waits for its slot,
-        // rather than a backing-off worker jumping the queue on its next try.
-        await this.limiter.acquire();
+    const requestOnce = async (): Promise<string> => {
+      const payload = await withRetry(
+        async () => {
+          // Pace INSIDE the retried function so a retry also waits for its slot,
+          // rather than a backing-off worker jumping the queue on its next try.
+          await this.limiter.acquire();
 
-        const response = await fetch(`${this.baseUrl}/chat/completions`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
-          },
-          body: JSON.stringify({
-            model: this.model,
-            messages,
-            max_tokens: options.maxTokens ?? 4000,
-            response_format: { type: "json_object" },
-          }),
-        });
+          const response = await fetch(`${this.baseUrl}/chat/completions`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+            },
+            body: JSON.stringify({
+              model: this.model,
+              messages,
+              max_tokens: options.maxTokens ?? 4000,
+              response_format: { type: "json_object" },
+            }),
+          });
 
-        if (!response.ok) {
-          const body = await response.text().catch(() => "");
-          const error: RetryableError = new Error(
-            `${this.name} returned ${response.status}: ${body.slice(0, 300)}`,
-          );
-          error.status = response.status;
-          // NVIDIA and most gateways send Retry-After on a 429; honour it
-          // rather than guessing a backoff.
-          error.retryAfterSeconds = parseRetryAfter(response.headers.get("retry-after"));
-          throw error;
-        }
+          if (!response.ok) {
+            const body = await response.text().catch(() => "");
+            const error: RetryableError = new Error(
+              `${this.name} returned ${response.status}: ${body.slice(0, 300)}`,
+            );
+            error.status = response.status;
+            // NVIDIA and most gateways send Retry-After on a 429; honour it
+            // rather than guessing a backoff.
+            error.retryAfterSeconds = parseRetryAfter(response.headers.get("retry-after"));
+            throw error;
+          }
 
-        return (await response.json()) as { choices?: { message?: { content?: string } }[] };
-      },
-      { maxRetries: this.maxRetries },
-    );
+          return (await response.json()) as { choices?: { message?: { content?: string } }[] };
+        },
+        { maxRetries: this.maxRetries },
+      );
+      const text = payload.choices?.[0]?.message?.content;
+      if (!text) throw new Error(`${this.name} returned no content.`);
+      return text;
+    };
 
-    const text = payload.choices?.[0]?.message?.content;
-    if (!text) throw new Error(`${this.name} returned no content.`);
-
-    // Smaller and self-hosted models wrap JSON in fences or prose despite
-    // instructions. Extract the outermost object rather than failing outright.
-    const cleaned = text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    const candidate = start !== -1 && end > start ? cleaned.slice(start, end + 1) : cleaned;
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(candidate);
-    } catch {
-      throw new Error(`${this.name} returned unparseable JSON: ${cleaned.slice(0, 200)}`);
+    // Two attempts, because a model that emits MALFORMED json (a stray token, a
+    // truncated field) on one call usually emits clean json on the next. This
+    // is not the same as the HTTP retry above: that handles 429/5xx; this
+    // handles a 200 whose body will not parse. Found while sweeping a real app,
+    // where deepseek-v4-flash returned `{", "thought": ...}` once and the whole
+    // flow errored out even though the app was working.
+    let lastText = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      lastText = await requestOnce();
+      const parsed = extractJson(lastText);
+      if (parsed !== undefined) {
+        const validated = schema.safeParse(parsed);
+        if (validated.success) return validated.data;
+      }
     }
-
-    return schema.parse(parsed);
+    throw new Error(`${this.name} returned unparseable or invalid JSON: ${lastText.slice(0, 200)}`);
   }
 
   async preflight(): Promise<void> {

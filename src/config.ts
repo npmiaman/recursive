@@ -46,7 +46,7 @@ const Schema = z.object({
    * Which engine edits customer code. See src/agents/fixers/, this is the one
    * knob a zero-egress customer needs to change.
    */
-  fixEngine: z.enum(["claude-agent-sdk", "openhands"]).default("claude-agent-sdk"),
+  fixEngine: z.enum(["claude-agent-sdk", "openhands", "native", "agentic"]).default("claude-agent-sdk"),
   openHandsModel: z.string().default("anthropic/claude-opus-4-8"),
   /** OpenAI-compatible endpoint. Set to keep the fix stage fully on-premises. */
   openHandsBaseUrl: z.string().optional(),
@@ -92,7 +92,7 @@ const parsed = Schema.parse({
   prBaseBranch: process.env.PR_BASE_BRANCH || "main",
   maxIterations: num(process.env.MAX_ITERATIONS, 12),
   verifyAfterDays: num(process.env.VERIFY_AFTER_DAYS, 3),
-  fixEngine: (process.env.FIX_ENGINE as "claude-agent-sdk" | "openhands") || "claude-agent-sdk",
+  fixEngine: (process.env.FIX_ENGINE as "claude-agent-sdk" | "openhands" | "native" | "agentic") || "claude-agent-sdk",
   openHandsModel: process.env.OPENHANDS_MODEL || "anthropic/claude-opus-4-8",
   openHandsBaseUrl: process.env.OPENHANDS_BASE_URL || undefined,
   llmProvider: (process.env.LLM_PROVIDER as "anthropic" | "openai") || "anthropic",
