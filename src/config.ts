@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -30,10 +31,20 @@ function loadEnvFile(path: string): void {
   }
 }
 
-// Load the .env of the project Recursive is pointed at FIRST (so its values
-// win), then Recursive's own .env as a development fallback. When installed as a
-// package and run from a project directory, only the former exists.
+// Configuration precedence, highest first (loadEnvFile keeps the first value it
+// sees, and real shell env is already in process.env, so it always wins):
+//
+//   1. real shell environment
+//   2. the project's own .env            (per-project override)
+//   3. the global ~/.recursive/.env      (set once, used in EVERY project)
+//   4. Recursive's own .env              (development fallback only)
+//
+// The global config is the answer to "I do not want to paste my model key into
+// every project." Set it once with `recursive config nvidia <key>` and every
+// codebase you point Recursive at inherits it, while any project that wants a
+// different model can still override it locally.
 loadEnvFile(resolve(process.cwd(), ".env"));
+loadEnvFile(resolve(homedir(), ".recursive", ".env"));
 loadEnvFile(resolve(ROOT, ".env"));
 
 /**

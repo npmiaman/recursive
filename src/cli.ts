@@ -72,6 +72,7 @@ SWEEP, browsing-agent regression runs (rhai)
                         --repair fix what breaks, don't just report it
 
 REPAIR. Tier 1: change the code until the flow actually passes
+ config              Set a model key once, used in every project (config nvidia <key>).
  init                Set up Recursive in the current project (run this first).
  doctor              Check every subsystem works against a codebase.
                         --repo PATH       codebase to check
@@ -414,6 +415,82 @@ async function cmdDoctor(): Promise<void> {
 }
 
 /**
+ * `recursive config`, the global model configuration.
+ *
+ * This is what makes "set my key once, use it in every codebase" work. It reads
+ * and writes `~/.recursive/.env`, which config.ts loads as a fallback beneath
+ * each project's own .env. So you configure a model here once and every project
+ * you point Recursive at inherits it, without a key ever being committed to any
+ * repository.
+ *
+ *   recursive config                      show what is set (secrets masked)
+ *   recursive config nvidia <nvapi-key>   set the whole free-NVIDIA bundle
+ *   recursive config OPENAI_MODEL <name>  set any single variable
+ */
+async function cmdConfig(): Promise<void> {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const globalEnv = resolve(os.homedir(), ".recursive", ".env");
+
+  const setVar = (key: string, value: string): void => {
+    fs.mkdirSync(resolve(os.homedir(), ".recursive"), { recursive: true });
+    const lines = fs.existsSync(globalEnv) ? fs.readFileSync(globalEnv, "utf8").split("\n") : [];
+    const kept = lines.filter((l) => l.trim() && !l.startsWith(`${key}=`));
+    kept.push(`${key}=${value}`);
+    // 0600: this file holds a secret. It lives in ~/.recursive, never in a repo.
+    fs.writeFileSync(globalEnv, kept.join("\n") + "\n", { mode: 0o600 });
+  };
+
+  const sub = process.argv[3];
+  const value = process.argv[4];
+
+  // Show.
+  if (!sub) {
+    console.log(`\nGlobal config: ${globalEnv}`);
+    if (!fs.existsSync(globalEnv)) {
+      console.log(`  (nothing set yet)\n\n  Set the free NVIDIA model in every project with:`);
+      console.log(`    recursive config nvidia nvapi-...\n`);
+      return;
+    }
+    for (const line of fs.readFileSync(globalEnv, "utf8").split("\n")) {
+      const m = line.match(/^([A-Z_]+)=(.*)$/);
+      if (!m) continue;
+      const secret = /KEY|SECRET|TOKEN/.test(m[1]!) && m[2];
+      const shown = secret && m[2]!.length > 10 ? `${m[2]!.slice(0, 6)}…${m[2]!.slice(-4)}` : m[2];
+      console.log(`  ${m[1]}=${shown}`);
+    }
+    console.log(`\n  Used by Recursive in every project (a project's own .env overrides it).\n`);
+    return;
+  }
+
+  // One-shot NVIDIA setup: the common case.
+  if (sub === "nvidia") {
+    if (!value || !value.startsWith("nvapi-")) {
+      console.error("Usage: recursive config nvidia <nvapi-...key>   (free at build.nvidia.com)");
+      process.exit(1);
+    }
+    setVar("LLM_PROVIDER", "openai");
+    setVar("OPENAI_BASE_URL", "https://integrate.api.nvidia.com/v1");
+    setVar("OPENAI_MODEL", "deepseek-ai/deepseek-v4-flash");
+    setVar("OPENAI_API_KEY", value);
+    setVar("OPENAI_RPM", "40");
+    setVar("FIX_ENGINE", "agentic");
+    console.log(`\n  ✓ NVIDIA model configured globally (${globalEnv}).`);
+    console.log(`  Every project you run Recursive in will now use it. Verify with:`);
+    console.log(`    recursive doctor\n`);
+    return;
+  }
+
+  // Set a single variable.
+  if (!value) {
+    console.error(`Usage: recursive config <NAME> <value>   e.g. recursive config OPENAI_MODEL deepseek-ai/deepseek-v4-pro`);
+    process.exit(1);
+  }
+  setVar(sub, value);
+  console.log(`Set ${sub} globally in ${globalEnv} (used by Recursive in every project).`);
+}
+
+/**
  * `recursive init`, onboard Recursive into the project it is run from.
  *
  * The first command a developer runs after installing. Registers the current
@@ -459,9 +536,16 @@ async function cmdInit(): Promise<void> {
     console.log(`  ✓ wrote recursive.flows.json (edit it to describe your real user journeys)`);
   }
 
-  // 3. .env template, only if the project has none.
+  // 3. Model config.
+  //
+  // If a model is already configured globally (`recursive config nvidia <key>`),
+  // this project inherits it and needs no .env at all. Only write a template
+  // when there is nothing to fall back on, so a user who set their key once is
+  // never asked to set it again per project.
   const envPath = resolve(repoPath, ".env");
-  if (!fs.existsSync(envPath)) {
+  if (process.env["OPENAI_API_KEY"] || process.env["ANTHROPIC_API_KEY"]) {
+    console.log(`  ✓ using your global model config (recursive config to view)`);
+  } else if (!fs.existsSync(envPath)) {
     fs.writeFileSync(
       envPath,
       [
@@ -1148,6 +1232,9 @@ async function main(): Promise<void> {
       return cmdFix();
     case "verify":
       return cmdVerify();
+    case "config":
+      await cmdConfig();
+      break;
     case "init":
       await cmdInit();
       break;
