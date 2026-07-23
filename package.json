@@ -1,11 +1,22 @@
 {
-  "name": "clarity-autoresearch",
+  "name": "recursive",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Autonomous UX agent: reads Microsoft Clarity, diagnoses friction, hill-climbs fixes against a local proxy scorer, opens PRs, then verifies against real Clarity data.",
+  "description": "Software that finds its own breakage, contains it, and opens a verified fix. Install it into a project and it learns the codebase, sweeps it in a real browser, and repairs what breaks.",
+  "bin": {
+    "recursive": "bin/recursive.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "packages",
+    "fixtures",
+    "tsconfig.json",
+    ".env.example",
+    "README.md"
+  ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.6"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

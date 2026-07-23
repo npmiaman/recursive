@@ -163,6 +163,12 @@ export async function repairFlow(options: RepairOptions): Promise<RepairResult> 
   // Long-lived and per-area, the way a team actually works: all frontend
   // repairs accumulate on one branch and one PR rather than producing a branch
   // per incident that nobody reviews.
+  // Base off the repo's ACTUAL default branch. Hardcoding "main" broke on every
+  // repo that still defaults to "master" (and any team using a different trunk),
+  // which `git checkout -b area main` fails on outright. The current branch at
+  // the start of a repair is the trunk we want to branch from and target.
+  const baseBranch = options.baseBranch ?? repo.currentBranch();
+
   let branch: string | undefined;
   if (!options.dryRun) {
     const area = classifyFile(implicatedFiles[0] ?? options.flow.touches[0] ?? "", {
@@ -170,7 +176,7 @@ export async function repairFlow(options: RepairOptions): Promise<RepairResult> 
     });
     const checkout = checkoutAreaBranch(area, {
       repoPath: options.repoPath,
-      base: options.baseBranch ?? "main",
+      base: baseBranch,
     });
     branch = checkout.branch;
     log(` branch ${branch} (${checkout.created ? "created" : "reused"})`);
@@ -312,7 +318,7 @@ export async function repairFlow(options: RepairOptions): Promise<RepairResult> 
       const pr = upsertPullRequest(
         options.repoPath,
         branch,
-        options.baseBranch ?? "main",
+        baseBranch,
         `Recursive: repair ${options.flow.name}`,
         [
           `**${options.flow.name}** was failing on \`${options.flow.url}\`.`,

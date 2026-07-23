@@ -101,7 +101,7 @@ async function act(
 
   try {
     if (decision.action === "goto") {
-      await page.goto(value, { waitUntil: "domcontentloaded", timeout: 20_000 });
+      await gotoResilient(page, value, { waitUntil: "domcontentloaded", timeout: 20_000 });
       return {
         ok: true,
         detail: `navigated to ${value}`,
@@ -138,6 +138,33 @@ async function act(
   }
 }
 
+/**
+ * Navigate, tolerating a server that is briefly down.
+ *
+ * Recursive verifies a repair by re-running the flow immediately after editing
+ * code. If the target is a dev server (next dev, node --watch, nodemon), that
+ * edit triggers a restart, and a navigation landing in the restart window gets
+ * ERR_CONNECTION_REFUSED. That is not a failed flow, it is a race with the
+ * server coming back, so retry a few times before believing it.
+ */
+async function gotoResilient(
+  page: { goto: (url: string, opts: { waitUntil: "domcontentloaded"; timeout: number }) => Promise<unknown> },
+  url: string,
+  opts: { waitUntil: "domcontentloaded"; timeout: number },
+): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await page.goto(url, opts);
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const restarting = /ERR_CONNECTION_REFUSED|ECONNREFUSED|ERR_CONNECTION_RESET|ERR_EMPTY_RESPONSE/.test(message);
+      if (attempt >= 5 || !restarting) throw error;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+}
+
 export async function runBrowseFlow(
   page: Page,
   flow: BrowseFlow,
@@ -166,7 +193,7 @@ export async function runBrowseFlow(
   const existing = loadTrace(flow.id);
   if (existing && !options.noReplay && traceIsTrustworthy(existing)) {
     transcript.push(`replaying ${existing.steps.length} recorded step(s)…`);
-    await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+    await gotoResilient(page, startUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
 
     const outcome = await replay(page, existing, variables);
 
@@ -196,7 +223,7 @@ export async function runBrowseFlow(
     saveTrace(existing);
     path = "repair";
   } else {
-    await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+    await gotoResilient(page, startUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
     recorded.push(stepFor("goto", undefined, { value: startUrl }));
   }
 

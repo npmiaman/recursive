@@ -125,40 +125,64 @@ agree.
 
 ---
 
-## Quick start
+## Install it into your project
 
-Requirements: **Node.js 22.6 or newer** (the project runs TypeScript directly via
-`--experimental-strip-types`, so there is no build step), **git**, and
-**Chromium** via Playwright.
+Requirements: **Node.js 22.6 or newer** (Recursive runs TypeScript directly, no
+build step), **git**, and **Chromium** via Playwright.
 
 ```bash
-git clone https://github.com/npmiaman/recursive.git
-cd recursive
-npm install
+npm install -g github:npmiaman/recursive
 npx playwright install chromium
 ```
 
-Configure the environment:
+Then, from inside the project you want it to watch over:
 
 ```bash
-cp .env.example .env
-# Open .env and set your keys. Never put a key anywhere else.
+cd /path/to/your/app
+
+recursive init            # register this project, write a flow manifest + .env template
+# put a model key in .env  (free: build.nvidia.com, see below)
+recursive doctor          # confirm every subsystem works here
+recursive memory index    # learn this codebase
+recursive sweep daily     # test it in a real browser
+recursive sweep daily --repair   # and fix what breaks
 ```
 
-Point it at a repository and let it learn the codebase:
+`recursive init` keeps everything with your project: its memory lives in
+`.recursive/` (add it to `.gitignore`), and the flow manifest and `.env` sit at
+the repo root. Nothing is stored in the global install, so each project keeps its
+own memory that is never deleted.
+
+The one thing to edit by hand is `recursive.flows.json`: describe the user
+journeys that matter (see [docs/testing.md](docs/testing.md) for the format and
+how to expose the test/trace endpoints that let Recursive check your backend).
+
+### Free model in two minutes
+
+Recursive needs a model for indexing, diagnosis, and code-writing. Any
+OpenAI-compatible endpoint works; the free option is NVIDIA's:
 
 ```bash
-npm run cli -- memory index --repo /path/to/your/app
+# in your project's .env
+LLM_PROVIDER=openai
+OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
+OPENAI_MODEL=deepseek-ai/deepseek-v4-flash
+OPENAI_API_KEY=nvapi-...      # free at build.nvidia.com, no card
+OPENAI_RPM=40
+FIX_ENGINE=agentic
 ```
 
-Describe the user journeys that matter:
+### Developing Recursive itself
 
 ```bash
-npm run cli -- sweep init --repo /path/to/your/app
-# then edit recursive.flows.json
+git clone https://github.com/npmiaman/recursive.git
+cd recursive && npm install && npx playwright install chromium
+cp .env.example .env          # set your keys
+npm run cli -- demo           # seeded end-to-end scenario, no keys needed
 ```
 
-Then run it:
+From the source checkout, use `npm run cli -- <command>` in place of the
+`recursive <command>` binary. Then run it:
 
 ```bash
 npm run cli -- sweep daily                 # test everything important

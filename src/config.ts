@@ -30,7 +30,26 @@ function loadEnvFile(path: string): void {
   }
 }
 
+// Load the .env of the project Recursive is pointed at FIRST (so its values
+// win), then Recursive's own .env as a development fallback. When installed as a
+// package and run from a project directory, only the former exists.
+loadEnvFile(resolve(process.cwd(), ".env"));
 loadEnvFile(resolve(ROOT, ".env"));
+
+/**
+ * Where Recursive keeps its per-project data (memory, projects, ledgers).
+ *
+ * When Recursive is installed into another project and run from there, its data
+ * belongs WITH that project, in `.recursive/`, not inside the globally-installed
+ * package (which is shared across every project and wiped on reinstall). When
+ * running from Recursive's own repo during development, it stays in `data/` so
+ * the tests and demo are unaffected.
+ */
+function defaultDataDir(): string {
+  if (process.env.RECURSIVE_DATA_DIR) return resolve(process.env.RECURSIVE_DATA_DIR);
+  const cwd = resolve(process.cwd());
+  return cwd === ROOT ? resolve(ROOT, "data") : resolve(cwd, ".recursive");
+}
 
 const Schema = z.object({
   anthropicApiKey: z.string().optional(),
@@ -104,7 +123,7 @@ const parsed = Schema.parse({
 
 export const config: Config = {
   ...parsed,
-  dataDir: resolve(ROOT, "data"),
+  dataDir: defaultDataDir(),
   // Opus 4.8 for every reasoning stage. Diagnosis quality is the whole product;
   // this is not the place to save tokens.
   model: "claude-opus-4-8",

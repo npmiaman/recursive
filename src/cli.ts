@@ -72,7 +72,8 @@ SWEEP, browsing-agent regression runs (rhai)
                         --repair fix what breaks, don't just report it
 
 REPAIR. Tier 1: change the code until the flow actually passes
- doctor              Check every subsystem works against a codebase (run this first).
+ init                Set up Recursive in the current project (run this first).
+ doctor              Check every subsystem works against a codebase.
                         --repo PATH       codebase to check
  repair FLOW_ID      Fix a failing flow, verifying after every change by
  re-running the real user journey AND checking the server.
@@ -389,6 +390,82 @@ async function cmdDoctor(): Promise<void> {
       "\n",
   );
   if (fails) process.exitCode = 1;
+}
+
+/**
+ * `recursive init`, onboard Recursive into the project it is run from.
+ *
+ * The first command a developer runs after installing. Registers the current
+ * directory as a project, drops a starter flow manifest and a `.env` template,
+ * and prints the two-step path to a first sweep. Everything lands in the
+ * project, not in the global install: memory in `.recursive/`, the manifest and
+ * env at the repo root.
+ */
+async function cmdInit(): Promise<void> {
+  const fs = await import("node:fs");
+  const { basename } = await import("node:path");
+  const repoPath = arg("repo") ?? process.cwd();
+  const id = (arg("project") ?? basename(resolve(repoPath))).toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  const baseUrl = arg("url") ?? "http://localhost:3000";
+
+  console.log(`\nSetting up Recursive in ${repoPath}\n`);
+
+  const repo = new Repo(repoPath);
+  if (!repo.isRepo()) {
+    console.error("This is not a git repository. Recursive reads git history, so run `git init` first.");
+    process.exit(1);
+  }
+
+  // 1. Register the project.
+  const { upsertProject } = await import("./tenant.ts");
+  upsertProject({
+    id,
+    tenantId: "local",
+    name: id,
+    environment: "development",
+    baseUrl,
+    repoPath: resolve(repoPath),
+    guardrails: { autonomyEnabled: false },
+  } as never);
+  console.log(`  ✓ registered project '${id}' -> ${baseUrl}`);
+
+  // 2. Flow manifest.
+  const manifest = resolve(repoPath, "recursive.flows.json");
+  if (fs.existsSync(manifest) && !flag("force")) {
+    console.log(`  · recursive.flows.json already exists (kept)`);
+  } else {
+    fs.writeFileSync(manifest, JSON.stringify({ ...EXAMPLE_MANIFEST, baseUrl }, null, 2) + "\n");
+    console.log(`  ✓ wrote recursive.flows.json (edit it to describe your real user journeys)`);
+  }
+
+  // 3. .env template, only if the project has none.
+  const envPath = resolve(repoPath, ".env");
+  if (!fs.existsSync(envPath)) {
+    fs.writeFileSync(
+      envPath,
+      [
+        "# Recursive configuration. This file is secret; add it to .gitignore.",
+        "# A free model powers indexing, diagnosis and code-writing:",
+        "LLM_PROVIDER=openai",
+        "OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1",
+        "OPENAI_MODEL=deepseek-ai/deepseek-v4-flash",
+        "OPENAI_API_KEY=nvapi-...   # get a free key at build.nvidia.com",
+        "OPENAI_RPM=40",
+        "FIX_ENGINE=agentic",
+        "",
+      ].join("\n"),
+    );
+    console.log(`  ✓ wrote a .env template (add your model key, then add .env to .gitignore)`);
+  } else {
+    console.log(`  · .env already exists (kept)`);
+  }
+
+  console.log(`\nNext:`);
+  console.log(`  1. put a model key in .env  (free: build.nvidia.com)`);
+  console.log(`  2. recursive doctor         # confirm everything works`);
+  console.log(`  3. recursive memory index   # learn this codebase`);
+  console.log(`  4. recursive sweep daily    # test it in a browser`);
+  console.log(`  5. recursive sweep daily --repair   # and fix what breaks\n`);
 }
 
 async function cmdStatus(): Promise<void> {
@@ -1047,6 +1124,9 @@ async function main(): Promise<void> {
       return cmdFix();
     case "verify":
       return cmdVerify();
+    case "init":
+      await cmdInit();
+      break;
     case "doctor":
       await cmdDoctor();
       break;

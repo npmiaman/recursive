@@ -156,6 +156,6 @@ If the evidence does not support a confident next step, say so instead of guessi
     // The hardest reasoning step in the system, this is where depth pays for
     // itself, because a wrong theory here costs another whole cycle.
     effort: "high",
-    maxTokens: 8000,
+    maxTokens: 16000,
   });
 }
