@@ -5,11 +5,12 @@ import { fileURLToPath } from "node:url";
 
 /**
  * Tiny static server for the demo site, so the probe has something deliberately
- * broken to measure. Not part of the product — it exists so `npm run cli -- score`
+ * broken to measure. Not part of the product, it exists so `npm run cli -- score`
  * can be verified without pointing at a real deployment.
  */
 
 const ROOT = resolve(fileURLToPath(new URL("./site", import.meta.url)));
+const SDK_PATH = resolve(fileURLToPath(new URL("../packages/sdk/recursive.js", import.meta.url)));
 const PORT = Number(process.env.PORT ?? 4173);
 
 const TYPES = {
@@ -22,7 +23,18 @@ const TYPES = {
 createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
-    // Contain the path inside ROOT — this server is local-only, but a traversal
+
+    // Serve the SDK straight from source rather than a copy in fixtures/, a
+    // duplicated recursive.js would silently go stale and the demo would stop
+    // reflecting the real artifact.
+    if (url.pathname === "/recursive.js") {
+      const sdk = await readFile(SDK_PATH);
+      res.writeHead(200, { "content-type": TYPES[".js"] });
+      res.end(sdk);
+      return;
+    }
+
+    // Contain the path inside ROOT, this server is local-only, but a traversal
     // bug here would happily serve the rest of the disk.
     let path = normalize(join(ROOT, decodeURIComponent(url.pathname)));
     if (!path.startsWith(ROOT)) {

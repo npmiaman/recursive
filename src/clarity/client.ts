@@ -3,11 +3,10 @@ import * as budget from "./budget.ts";
 import { generateMockResponse } from "./mock.ts";
 import type { ClarityResponse, Dimension, Snapshot } from "./types.ts";
 
-const ENDPOINT =
-  "https://www.clarity.ms/export-data/api/v1/project-live-insights";
+const ENDPOINT = "https://www.clarity.ms/export-data/api/v1/project-live-insights";
 
 export interface FetchOptions {
-  /** 1, 2 or 3 — the API accepts nothing else. */
+  /** 1, 2 or 3, the API accepts nothing else. */
   numOfDays?: 1 | 2 | 3;
   /** Up to three dimensions. More than three is rejected by the API. */
   dimensions?: Dimension[];
@@ -38,9 +37,7 @@ export class ClarityApiError extends Error {
  *  - response capped at 1000 rows, no pagination (so no retry-for-more loop)
  *  - 10 calls/project/day, enforced by the budget ledger before we hit the wire
  */
-export async function fetchInsights(
-  options: FetchOptions = {},
-): Promise<Snapshot> {
+export async function fetchInsights(options: FetchOptions = {}): Promise<Snapshot> {
   const numOfDays = options.numOfDays ?? 3;
   const dimensions = (options.dimensions ?? ["URL"]).slice(0, 3);
   const label = options.label ?? `insights(${dimensions.join("+") || "none"})`;

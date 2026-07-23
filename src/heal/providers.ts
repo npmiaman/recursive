@@ -8,8 +8,8 @@ import { latestRelease, readReleases, type Release } from "../detect/store.ts";
  * Containment providers.
  *
  * Recursive never holds standing write access to a customer's production. It acts
- * *through* mechanisms the customer already controls — their flag service, their
- * deploy tool — using credentials they scope and can revoke (ARCHITECTURE.md §4).
+ * *through* mechanisms the customer already controls, their flag service, their
+ * deploy tool, using credentials they scope and can revoke (ARCHITECTURE.md §4).
  *
  * These interfaces are the seam. The local implementations make the loop
  * demonstrable end to end; the hosted ones (LaunchDarkly, Statsig, Vercel) are
@@ -18,7 +18,7 @@ import { latestRelease, readReleases, type Release } from "../detect/store.ts";
 
 export interface FlagProvider {
   readonly name: string;
-  /** Turn a flag off — the containment action. */
+  /** Turn a flag off, the containment action. */
   disable(flag: string): Promise<void>;
   /** The inverse, for revert. */
   enable(flag: string): Promise<void>;
@@ -42,7 +42,7 @@ function directivesPath(projectId: string): string {
 }
 
 /**
- * Local flag provider — writes the directives document the SDK polls.
+ * Local flag provider, writes the directives document the SDK polls.
  *
  * This closes the loop without any third-party dependency: Recursive writes
  * `{flags: {"checkout-v2": false}}`, the SDK fetches it, and
@@ -51,8 +51,13 @@ function directivesPath(projectId: string): string {
  */
 export class LocalFlagProvider implements FlagProvider {
   readonly name = "local";
+  // Explicit field + assignment, not a constructor parameter property. Node's
+  // type-stripping loader cannot compile the latter, and tsc won't warn you.
+  private readonly projectId: string;
 
-  constructor(private readonly projectId: string) {}
+  constructor(projectId: string) {
+    this.projectId = projectId;
+  }
 
   private read(): Record<string, boolean> {
     const path = directivesPath(this.projectId);
@@ -90,7 +95,7 @@ export class LocalFlagProvider implements FlagProvider {
 export class NoopFlagProvider implements FlagProvider {
   readonly name = "none";
   async disable(): Promise<void> {
-    throw new Error("No flag provider is configured for this project — nothing to contain with.");
+    throw new Error("No flag provider is configured for this project, nothing to contain with.");
   }
   async enable(): Promise<void> {
     throw new Error("No flag provider is configured for this project.");
@@ -103,7 +108,7 @@ export class NoopFlagProvider implements FlagProvider {
 // ------------------------------------------------------------ local deploys
 
 /**
- * Local deploy provider — records rollback *intent* without performing one.
+ * Local deploy provider, records rollback *intent* without performing one.
  *
  * Deliberately inert. A rollback is the highest-blast-radius action Tier 0 can
  * take, and wiring it to a real deploy system is a decision a customer makes
@@ -112,8 +117,11 @@ export class NoopFlagProvider implements FlagProvider {
  */
 export class LocalDeployProvider implements DeployProvider {
   readonly name = "local";
+  private readonly projectId: string;
 
-  constructor(private readonly projectId: string) {}
+  constructor(projectId: string) {
+    this.projectId = projectId;
+  }
 
   async current(): Promise<Release | undefined> {
     return latestRelease(this.projectId);
@@ -125,7 +133,7 @@ export class LocalDeployProvider implements DeployProvider {
       throw new Error(`Refusing to roll back to unknown release '${release.id}'.`);
     }
     console.log(
-      `[deploy:local] would roll back to ${release.id}${release.sha ? ` (${release.sha.slice(0, 8)})` : ""} — ` +
+      `[deploy:local] would roll back to ${release.id}${release.sha ? ` (${release.sha.slice(0, 8)})` : ""}, ` +
         `no deploy provider is wired, so this is recorded intent only.`,
     );
   }
@@ -150,7 +158,7 @@ export function flagProviderFor(project: Project): FlagProvider {
     case "launchdarkly":
     case "statsig":
     case "custom":
-      // Intentionally unimplemented rather than silently degrading — a customer
+      // Intentionally unimplemented rather than silently degrading, a customer
       // who configured LaunchDarkly must not have their incident quietly
       // contained by a local file the SDK may not even be reading.
       throw new Error(

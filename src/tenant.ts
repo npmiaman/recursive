@@ -11,7 +11,7 @@ import { config } from "./config.ts";
  * scoped to a project id, and there is no code path that reads across projects.
  *
  * Credentials live here as *references*, never as values. Recursive acts on a
- * customer's production through mechanisms they already control and can revoke —
+ * customer's production through mechanisms they already control and can revoke,
  * so what we store is "which flag provider, under which key name", not the key.
  */
 
@@ -42,7 +42,7 @@ export const ProjectSchema = z.object({
 
   /**
    * Customer-set caps. Enforced by us; the agent cannot raise them.
-   * See ARCHITECTURE.md §4 — blast radius is capped before it is calculated.
+   * See ARCHITECTURE.md §4, blast radius is capped before it is calculated.
    */
   guardrails: z
     .object({
@@ -54,10 +54,30 @@ export const ProjectSchema = z.object({
       cooldownMinutes: z.number().int().min(0).default(30),
       /** Signal classes Tier 0 may act on. Anything else escalates to a human. */
       allowedActions: z.array(z.enum(["flag-off", "rollback"])).default(["flag-off"]),
+      /**
+       * Paths where switching things OFF is not an acceptable response.
+       *
+       * Containment assumes there is something to fall back to. For core
+       * functionality there often isn't, disabling checkout is not a milder
+       * form of broken checkout, it is the same outage with a different cause.
+       * Failures matching these prefixes skip containment entirely and go
+       * straight to repair.
+       */
+      repairOnlyPaths: z.array(z.string()).default([]),
       /** Master off switch, customer-controlled. */
       autonomyEnabled: z.boolean().default(false),
     })
-    .default({}),
+    // Spelled out rather than `{}`, these are the safety values a project gets
+    // when it configures nothing, so they should be readable at a glance.
+    // Autonomy off by default: never configured means never consented.
+    .default({
+      maxBlastRadiusPct: 100,
+      maxActionsPerHour: 3,
+      cooldownMinutes: 30,
+      allowedActions: ["flag-off"],
+      repairOnlyPaths: [],
+      autonomyEnabled: false,
+    }),
 });
 
 export type Project = z.infer<typeof ProjectSchema>;
@@ -98,7 +118,7 @@ export function upsertProject(project: Project): void {
 
 /**
  * The single-project fallback, so the CLI works before any tenant is configured.
- * Autonomy is off — a project that was never explicitly configured has never
+ * Autonomy is off, a project that was never explicitly configured has never
  * consented to autonomous action.
  */
 export function defaultProject(): Project {

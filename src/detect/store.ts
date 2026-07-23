@@ -4,7 +4,7 @@ import { config } from "../config.ts";
 import type { Incident, Signal } from "./types.ts";
 
 /**
- * Per-project storage. Every path is scoped by project id — there is no function
+ * Per-project storage. Every path is scoped by project id, there is no function
  * here that reads across projects, which is the structural half of tenant
  * isolation (ARCHITECTURE.md §4).
  */
@@ -52,7 +52,7 @@ export interface Release {
   id: string;
   projectId: string;
   at: string;
-  /** Commit sha, if known — needed for rollback. */
+  /** Commit sha, if known, needed for rollback. */
   sha?: string;
   /** The release this superseded, i.e. the rollback target. */
   previous?: string;

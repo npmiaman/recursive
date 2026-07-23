@@ -6,7 +6,7 @@ import { config } from "./config.ts";
  *
  * AutoResearch's whole safety model is "commit if it improved, roll back if it
  * didn't". That only works if rollback is exact, so every attempt runs against a
- * recorded HEAD and a clean tree, and reverting is a hard reset plus a clean —
+ * recorded HEAD and a clean tree, and reverting is a hard reset plus a clean,
  * not a best-effort undo.
  */
 
@@ -51,7 +51,7 @@ export function revertTo(commit: string): void {
   git(["clean", "-fd"]);
 }
 
-/** Whether the working tree differs from HEAD — i.e. the agent actually edited something. */
+/** Whether the working tree differs from HEAD, i.e. the agent actually edited something. */
 export function hasChanges(): boolean {
   return git(["status", "--porcelain"]).length > 0;
 }
@@ -96,9 +96,8 @@ export function openPullRequest(title: string, body: string, base: string): stri
       "The `gh` CLI is required to open PRs. Install it (https://cli.github.com) and run `gh auth login`.",
     );
   }
-  return execFileSync(
-    "gh",
-    ["pr", "create", "--title", title, "--body", body, "--base", base],
-    { cwd: repoPath(), encoding: "utf8" },
-  ).trim();
+  return execFileSync("gh", ["pr", "create", "--title", title, "--body", body, "--base", base], {
+    cwd: repoPath(),
+    encoding: "utf8",
+  }).trim();
 }

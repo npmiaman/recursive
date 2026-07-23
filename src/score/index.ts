@@ -26,12 +26,7 @@ export interface Score {
 /** Probes that mutate page state and therefore need their own fresh load. */
 const DESTRUCTIVE: IssueKind[] = ["rage-click", "error-click"];
 
-const READ_ONLY: IssueKind[] = [
-  "dead-click",
-  "excessive-scroll",
-  "quickback",
-  "script-error",
-];
+const READ_ONLY: IssueKind[] = ["dead-click", "excessive-scroll", "quickback", "script-error"];
 
 export class Scorer {
   private browser?: Browser;
@@ -72,8 +67,7 @@ export class Scorer {
     await page.waitForTimeout(500);
 
     // Fallback: if the init script didn't take (CSP, an early navigation, a
-    // Playwright behaviour change), inject now. Listener detection degrades —
-    // handlers registered before this point are missed — so say so loudly
+    // Playwright behaviour change), inject now. Listener detection degrades, // handlers registered before this point are missed, so say so loudly
     // rather than silently reporting inflated dead-click numbers.
     const present = await page.evaluate(
       () => typeof (window as unknown as { __uxProbe?: unknown }).__uxProbe !== "undefined",
@@ -103,7 +97,7 @@ export class Scorer {
    *
    * The composite deliberately blends the issue's own probe with every other
    * probe. Without that regression term the agent could "fix" dead clicks by
-   * deleting the element, or fix excessive scroll by removing content — the
+   * deleting the element, or fix excessive scroll by removing content, the
    * primary metric would improve while the page got worse. The 30% guard makes
    * collateral damage cost more than the fix is worth.
    */
@@ -141,8 +135,7 @@ export class Scorer {
     const regressionMean = regressionCount ? regressionSum / regressionCount : 0;
 
     // Weighted toward the WORST guard, not the average. Averaging across five
-    // guards dilutes a single catastrophic regression into near-invisibility —
-    // measured in testing, converting dead <div>s into <button>s that still had
+    // guards dilutes a single catastrophic regression into near-invisibility, // measured in testing, converting dead <div>s into <button>s that still had
     // no handler sent rage-click from 0.00 to 0.80 while moving the averaged
     // composite by only ~0.05. Trading one defect for another should not read as
     // a clean win.
@@ -172,10 +165,10 @@ export async function scoreOnce(issue: Issue): Promise<Score> {
 export function formatScore(score: Score): string {
   const lines = [
     `score ${score.total.toFixed(4)}  (lower is better)  ${score.url}`,
-    `  primary  ${score.primary.kind.padEnd(17)} ${score.primary.score.toFixed(4)}  ${score.primary.detail}`,
+    ` primary  ${score.primary.kind.padEnd(17)} ${score.primary.score.toFixed(4)}  ${score.primary.detail}`,
   ];
   for (const [kind, result] of Object.entries(score.regression)) {
-    lines.push(`  guard    ${kind.padEnd(17)} ${result.score.toFixed(4)}  ${result.detail}`);
+    lines.push(` guard    ${kind.padEnd(17)} ${result.score.toFixed(4)}  ${result.detail}`);
   }
   return lines.join("\n");
 }

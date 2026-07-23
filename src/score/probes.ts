@@ -3,7 +3,7 @@ import type { IssueKind } from "../diagnose/issues.ts";
 import type { Candidate, Layout, PageError } from "./instrument.ts";
 
 /**
- * A probe returns a penalty in [0,1] where **lower is better** — the direct
+ * A probe returns a penalty in [0,1] where **lower is better**, the direct
  * analog of AutoResearch's `val_bpb`. Every probe must be deterministic for a
  * given page state, because the hill-climb's keep/revert decision is only
  * meaningful if an unchanged page scores identically twice.
@@ -36,8 +36,11 @@ async function layout(page: Page): Promise<Layout> {
 
 async function counters(page: Page): Promise<{ mutations: number; requests: number }> {
   return page.evaluate(() =>
-    (window as unknown as { __uxProbe: { counters: () => { mutations: number; requests: number } } })
-      .__uxProbe.counters(),
+    (
+      window as unknown as {
+        __uxProbe: { counters: () => { mutations: number; requests: number } };
+      }
+    ).__uxProbe.counters(),
   );
 }
 
@@ -48,7 +51,7 @@ async function resetCounters(page: Page): Promise<void> {
 }
 
 /**
- * DEAD CLICK — the fraction of elements that present as interactive
+ * DEAD CLICK, the fraction of elements that present as interactive
  * (cursor:pointer, button-like class, onclick attr) but have neither native
  * semantics nor a registered click listener. This is the mechanical form of
  * "user clicked it and nothing happened".
@@ -71,7 +74,7 @@ export async function probeDeadClick(page: Page): Promise<ProbeResult> {
 }
 
 /**
- * RAGE CLICK — click each genuinely-actionable candidate and check whether
+ * RAGE CLICK, click each genuinely-actionable candidate and check whether
  * *anything* observably happens within a short window (DOM mutation, network
  * request, or navigation). A control that responds to nothing is what users
  * escalate against.
@@ -118,7 +121,7 @@ export async function probeRageClick(page: Page): Promise<ProbeResult> {
   };
 }
 
-/** SCRIPT ERROR — uncaught errors and rejections during load and interaction. */
+/** SCRIPT ERROR, uncaught errors and rejections during load and interaction. */
 export async function probeScriptError(page: Page): Promise<ProbeResult> {
   const collected = await errors(page);
   // Three or more distinct errors is treated as fully broken; the curve is
@@ -132,7 +135,7 @@ export async function probeScriptError(page: Page): Promise<ProbeResult> {
   };
 }
 
-/** ERROR CLICK — clicking a control that then throws. */
+/** ERROR CLICK, clicking a control that then throws. */
 export async function probeErrorClick(page: Page): Promise<ProbeResult> {
   const before = new Set((await errors(page)).map((e) => e.message));
   const found = (await candidates(page)).filter((c) => c.actionable).slice(0, 10);
@@ -166,7 +169,7 @@ export async function probeErrorClick(page: Page): Promise<ProbeResult> {
 }
 
 /**
- * EXCESSIVE SCROLL — how far the user must travel to reach the primary action,
+ * EXCESSIVE SCROLL, how far the user must travel to reach the primary action,
  * plus raw page length relative to the viewport. A CTA below three viewports is
  * treated as fully buried.
  */
@@ -174,7 +177,7 @@ export async function probeExcessiveScroll(page: Page): Promise<ProbeResult> {
   const { height, viewport, ctaY } = await layout(page);
   const viewports = viewport > 0 ? height / viewport : 1;
 
-  // Length alone is not a defect — a long article is fine. Weight it lightly.
+  // Length alone is not a defect, a long article is fine. Weight it lightly.
   const lengthPenalty = clamp01((viewports - 4) / 8);
   // CTA depth is the real signal.
   const ctaPenalty = ctaY === null ? 0.6 : clamp01(ctaY / (viewport * 3));
@@ -191,22 +194,20 @@ export async function probeExcessiveScroll(page: Page): Promise<ProbeResult> {
 }
 
 /**
- * QUICKBACK — users bouncing straight back. Proxied by how long the page takes
+ * QUICKBACK, users bouncing straight back. Proxied by how long the page takes
  * to present something useful, plus whether there is meaningful above-fold
  * content at all.
  */
 export async function probeQuickback(page: Page): Promise<ProbeResult> {
   const timing = await page.evaluate(() => {
     const nav = performance.getEntriesByType("navigation")[0] as
-      | PerformanceNavigationTiming
-      | undefined;
+      PerformanceNavigationTiming | undefined;
     const paints = performance.getEntriesByType("paint");
     const fcp = paints.find((p) => p.name === "first-contentful-paint");
-    const aboveFold = Array.from(document.querySelectorAll("h1,h2,p,img,video"))
-      .filter((el) => {
-        const rect = el.getBoundingClientRect();
-        return rect.top < window.innerHeight && rect.height > 0 && rect.width > 0;
-      }).length;
+    const aboveFold = Array.from(document.querySelectorAll("h1,h2,p,img,video")).filter((el) => {
+      const rect = el.getBoundingClientRect();
+      return rect.top < window.innerHeight && rect.height > 0 && rect.width > 0;
+    }).length;
     return {
       fcp: fcp ? fcp.startTime : null,
       domContentLoaded: nav ? nav.domContentLoadedEventEnd : null,

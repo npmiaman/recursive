@@ -2,6 +2,8 @@
 import { resolve } from "node:path";
 import { config } from "./config.ts";
 import { fetchInsights } from "./clarity/client.ts";
+import type { Dimension } from "./clarity/types.ts";
+import { analyzeCohorts, explainAnalysis } from "./cohort/analyze.ts";
 import * as budget from "./clarity/budget.ts";
 import * as store from "./clarity/store.ts";
 import { diagnose } from "./diagnose/rank.ts";
@@ -16,38 +18,96 @@ import { correlate, describeIncident } from "./detect/correlate.ts";
 import { readAudit, readSignals } from "./detect/store.ts";
 import { runHealthChecks } from "./detect/health.ts";
 import { heal, verifyContainment } from "./heal/tier0.ts";
+import { describeEngines, resolveFixer } from "./agents/fixers/index.ts";
+import { Retriever } from "./retrieve/index.ts";
+import { describeProvider, resolveProvider } from "./llm/provider.ts";
+import { Repo, derivedReleases } from "./repo/git.ts";
+import { sweep } from "./sweep/sweep.ts";
+import { stats as memoryStats } from "./memory/store.ts";
+import { buildBaseMemory, baseMemoryStats } from "./memory/base.ts";
+import { findSimilarCases } from "./memory/match.ts";
+import { allLessons } from "./memory/recall.ts";
+import { EXAMPLE_MANIFEST, loadFlows } from "./sweep/flows.ts";
+import { repairFlow } from "./loop/repair.ts";
 import { seedScenario, DEMO_PROJECT_ID } from "./demo.ts";
 
 const HELP = `
-Recursive — detect breakage (including the silent kind), contain it, repair it.
+Recursive, detect breakage (including the silent kind), contain it, repair it.
 
 DETECT
-  ingest [file]       Ingest a telemetry batch (JSON file, or stdin).
-  health              Run synthetic journey checks — needs no live traffic.
-  incidents           Correlate recent signals into incidents.
-                        --project ID      target project
-                        --window N        minutes to correlate (default 60)
+ ingest [file]       Ingest a telemetry batch (JSON file, or stdin).
+ health              Run synthetic journey checks, needs no live traffic.
+ incidents           Correlate recent signals into incidents.
+                        --project ID target project
+                        --window N minutes to correlate (default 60)
 
-TIER 0 — CONTAIN (seconds, reversible, no human)
-  heal                Evaluate incidents and contain what is safely containable.
-                        --dry-run         evaluate guardrails, execute nothing
-  containment         Did containment actually work? Reverts trust if not.
-  audit               Immutable log of every autonomous action and why.
+TIER 0. CONTAIN (seconds, reversible, no human)
+ heal                Evaluate incidents and contain what is safely containable.
+                        --dry-run evaluate guardrails, execute nothing
+ containment         Did containment actually work? Reverts trust if not.
+ audit               Immutable log of every autonomous action and why.
 
-TIER 1 — REPAIR (minutes, always a PR)
-  snapshot            Pull Clarity data into the local time series.
-  diagnose            Rank friction issues from the latest snapshot.
-  score <index>       Measure one issue's page with the headless probe.
-  fix [index]         Hill-climb a fix, then open a PR.
-                        --top-issue       pick the highest-severity issue
-                        --max-iter N      cap iterations (default ${config.maxIterations})
-                        --dry-run         commit to a branch, don't push
-  verify              Re-sample Clarity to confirm shipped fixes worked.
+TIER 1. REPAIR (minutes, always a PR)
+ snapshot            Pull Clarity data into the local time series.
+                        --dimensions A,B e.g. URL,Device (max 3, costs 1 call)
+ cohorts             Find groups of users hit far harder than everyone else.
+                        --dimension D     Device | Browser | OS | Source | Country/Region
+ diagnose            Rank friction issues from the latest snapshot.
+ score <index>       Measure one issue's page with the headless probe.
+ fix [index]         Hill-climb a fix, then open a PR.
+                        --top-issue pick the highest-severity issue
+                        --max-iter N cap iterations (default ${config.maxIterations})
+                        --dry-run commit to a branch, don't push
+ verify              Re-sample Clarity to confirm shipped fixes worked.
+
+SWEEP, browsing-agent regression runs (rhai)
+ sweep init          Write a starter recursive.flows.json into the repo.
+ sweep pr            Test only the flows a diff put at risk. Fast; gates a merge.
+                        --base REF diff against (default HEAD~1)
+ sweep daily         Test every core flow plus the highest-risk remainder.
+                        --max N cap flows (default 12)
+ sweep               Either mode: --dry-run to see the plan, --watch to see the browser.
+                        --engine E        'internal' (fast, default) or 'rhai'
+                        --concurrency N flows at once (default 3)
+                        --repair fix what breaks, don't just report it
+
+REPAIR. Tier 1: change the code until the flow actually passes
+ repair FLOW_ID      Fix a failing flow, verifying after every change by
+ re-running the real user journey AND checking the server.
+                      Loops until it passes or it can honestly say it is stuck.
+                        --repo PATH repo to edit
+                        --cycles N max attempts (default 4)
+                        --base REF branch to base off / target (default main)
+                        --only PATHS comma-separated paths the agent may edit
+                        --no-pr commit to the area branch, don't open a PR
+                        --dry-run diagnose and verify, change nothing
+
+MEMORY, permanent, per-project, never deleted
+ memory index        Build BASE memory: read every file, learn what it does.
+                        --repo PATH repo to index
+                        --enrich N cap on model summaries (default 1500 = all)
+                        --no-enrich structural only, no model calls
+                        --full re-index everything, not just changed files
+ memory              What this project has learned: counts, lessons, hit rate.
+ memory search "..." Find past failures similar to a description.
+
+CODEBASE
+ retrieve            Find the code relevant to a failure. Shows how it decided.
+                        --message "..." error text or description
+                        --stack-file F file containing a stack trace
+                        --selector "..."  CSS selector implicated
+                        --route /path where it happened
+                        --at ISO when it first appeared (uses git history)
+                        --repo PATH repo to search (default TARGET_REPO_PATH)
+                        --expand translate the failure into code vocabulary first
+                        --rerank have a model read the shortlist and reorder it
+ history             What git knows: recent releases, churn, suspect commits.
 
 GENERAL
-  projects            List configured projects and their guardrails.
-  status              Budget, snapshots, shipped fixes, probe calibration.
-  demo                Seed a realistic silent-breakage scenario and show the loop.
+ engines             Which code-edit engines are available, and their licences.
+ projects            List configured projects and their guardrails.
+ status              Budget, snapshots, shipped fixes, probe calibration.
+ demo                Seed a realistic silent-breakage scenario and show the loop.
 
 No Clarity token and no customer needed: \`npm run cli -- demo\` seeds a scenario
 and runs detection + containment end to end against fixtures.
@@ -83,18 +143,25 @@ async function cmdSnapshot(): Promise<void> {
     `Clarity budget: ${before.remaining}/${before.limit} calls left today (${before.date} UTC)`,
   );
 
+  // Up to three dimensions ride on ONE call. Pulling URL+Device together is how
+  // cohort analysis stays inside the 10-calls-a-day budget.
+  const dimensions = (arg("dimensions") ?? "URL")
+    .split(",")
+    .map((d) => d.trim())
+    .filter(Boolean) as Dimension[];
+
   const snapshot = await fetchInsights({
     numOfDays: days as 1 | 2 | 3,
-    dimensions: ["URL"],
-    label: "cli-snapshot",
+    dimensions,
+    label: `cli-snapshot(${dimensions.join("+")})`,
   });
   store.append(snapshot);
 
   const metrics = snapshot.payload.map((b) => `${b.metricName}(${b.information.length})`);
-  console.log(`✓ ${snapshot.source} snapshot stored — ${metrics.join(", ")}`);
+  console.log(`✓ ${snapshot.source} snapshot stored, ${metrics.join(", ")}`);
   console.log(`  ${store.count()} snapshot(s) in local history.`);
   if (snapshot.source === "mock") {
-    console.log("  (fixtures — set CLARITY_API_TOKEN for live data)");
+    console.log("  (fixtures, set CLARITY_API_TOKEN for live data)");
   }
 }
 
@@ -107,7 +174,9 @@ async function cmdDiagnose(): Promise<void> {
     return;
   }
 
-  console.log(`\n${issues.length} issue(s) found. Top ${Math.min(top, issues.length)} by severity:\n`);
+  console.log(
+    `\n${issues.length} issue(s) found. Top ${Math.min(top, issues.length)} by severity:\n`,
+  );
   issues.slice(0, top).forEach((issue, i) => {
     console.log(`  ${String(i).padStart(2)}. ${describe(issue)}`);
   });
@@ -155,7 +224,7 @@ async function cmdFix(): Promise<void> {
   console.log("\nShipping…");
   await ship(result, { dryRun: flag("dry-run") });
   console.log(
-    `\nThe probe says this is better. Clarity hasn't voted yet — ` +
+    `\nThe probe says this is better. Clarity hasn't voted yet, ` +
       `run \`npm run verify\` in ${config.verifyAfterDays} days.`,
   );
 }
@@ -167,10 +236,12 @@ async function cmdVerify(): Promise<void> {
 async function cmdStatus(): Promise<void> {
   const b = budget.state();
   console.log(`\nClarity API budget   ${b.remaining}/${b.limit} remaining today (${b.date} UTC)`);
-  console.log(`Mode                 ${config.clarityMode}${config.clarityToken ? "" : " (no token — using fixtures)"}`);
+  console.log(
+    `Mode                 ${config.clarityMode}${config.clarityToken ? "" : " (no token, using fixtures)"}`,
+  );
   console.log(`Snapshots stored     ${store.count()}`);
   console.log(`Target site          ${config.targetBaseUrl}`);
-  console.log(`Target repo          ${config.targetRepoPath ?? "(unset — fix loop disabled)"}`);
+  console.log(`Target repo          ${config.targetRepoPath ?? "(unset, fix loop disabled)"}`);
 
   const shipped = readShipped();
   const verified = shipped.filter((f) => f.verification);
@@ -178,7 +249,9 @@ async function cmdStatus(): Promise<void> {
   for (const fix of shipped.slice(-8)) {
     const v = fix.verification;
     const mark = !v ? "pending" : v.verdict;
-    console.log(`  [${mark.padEnd(12)}] ${fix.kind} on ${fix.url}${fix.prUrl ? ` — ${fix.prUrl}` : ""}`);
+    console.log(
+      `  [${mark.padEnd(12)}] ${fix.kind} on ${fix.url}${fix.prUrl ? `, ${fix.prUrl}` : ""}`,
+    );
   }
 
   const calibration = Object.values(readCalibration());
@@ -209,10 +282,12 @@ async function cmdProjects(): Promise<void> {
   for (const p of all) {
     const g = p.guardrails;
     console.log(`\n${p.id}  (${p.name}, ${p.environment})`);
-    console.log(`  base URL      ${p.baseUrl}`);
-    console.log(`  containment   flags=${p.containment.flagProvider} deploy=${p.containment.deployProvider}`);
+    console.log(` base URL      ${p.baseUrl}`);
     console.log(
-      `  autonomy      ${g.autonomyEnabled ? "ENABLED" : "disabled"} — ` +
+      ` containment flags=${p.containment.flagProvider} deploy=${p.containment.deployProvider}`,
+    );
+    console.log(
+      ` autonomy      ${g.autonomyEnabled ? "ENABLED" : "disabled"}, ` +
         `actions [${g.allowedActions.join(", ")}], blast ≤${g.maxBlastRadiusPct}%, ` +
         `≤${g.maxActionsPerHour}/hr, cooldown ${g.cooldownMinutes}m`,
     );
@@ -239,9 +314,11 @@ async function cmdIncidents(): Promise<void> {
   const windowMs = Number(arg("window") ?? 60) * 60_000;
   const incidents = correlate(p.id, { windowMs });
 
-  console.log(`\n${p.id} — ${readSignals(p.id, windowMs).length} signal(s) in the last ${Math.round(windowMs / 60000)}m\n`);
+  console.log(
+    `\n${p.id}, ${readSignals(p.id, windowMs).length} signal(s) in the last ${Math.round(windowMs / 60000)}m\n`,
+  );
   if (incidents.length === 0) {
-    console.log("  no incidents");
+    console.log(" no incidents");
     return;
   }
   for (const incident of incidents) {
@@ -258,7 +335,7 @@ async function cmdHealth(): Promise<void> {
   for (const r of results) {
     console.log(
       `  ${r.ok ? "✓" : "✗"} ${r.journey} (${r.durationMs}ms)` +
-        (r.ok ? "" : `\n      failed at '${r.failedStep}': ${r.reason}`),
+        (r.ok ? "" : `\n failed at '${r.failedStep}': ${r.reason}`),
     );
   }
   if (signals.length) console.log(`\n${signals.length} failure signal(s) recorded.`);
@@ -267,12 +344,12 @@ async function cmdHealth(): Promise<void> {
 async function cmdHeal(): Promise<void> {
   const p = project();
   const windowMs = Number(arg("window") ?? 60) * 60_000;
-  console.log(`\nTier 0 — contain  [${p.id}]${flag("dry-run") ? "  (dry run)" : ""}\n`);
+  console.log(`\nTier 0, contain  [${p.id}]${flag("dry-run") ? "  (dry run)" : ""}\n`);
   const report = await heal(p, { windowMs, dryRun: flag("dry-run") });
   const executed = report.outcomes.filter((o) => o.executed).length;
   const blocked = report.outcomes.filter((o) => !o.executed && o.blockedBy.length).length;
   console.log(
-    `\n${report.incidentsConsidered} incident(s) considered — ${executed} contained, ${blocked} not acted on.`,
+    `\n${report.incidentsConsidered} incident(s) considered, ${executed} contained, ${blocked} not acted on.`,
   );
 }
 
@@ -293,17 +370,17 @@ async function cmdAudit(): Promise<void> {
   const p = project();
   const records = readAudit(p.id);
   if (records.length === 0) {
-    console.log("No audit records — nothing autonomous has run for this project.");
+    console.log("No audit records, nothing autonomous has run for this project.");
     return;
   }
   console.log(`\n${records.length} audit record(s) for ${p.id}:\n`);
   for (const r of records.slice(-25)) {
     console.log(`  [${r.outcome.padEnd(8)}] ${r.at}  ${r.action}  (${r.actor})`);
-    if (r.incidentId) console.log(`      incident: ${r.incidentId}`);
+    if (r.incidentId) console.log(` incident: ${r.incidentId}`);
     const blocked = r.detail["blockedBy"];
-    if (Array.isArray(blocked)) for (const b of blocked) console.log(`      blocked: ${b}`);
+    if (Array.isArray(blocked)) for (const b of blocked) console.log(` blocked: ${b}`);
     const rationale = r.detail["rationale"];
-    if (typeof rationale === "string") console.log(`      why: ${rationale}`);
+    if (typeof rationale === "string") console.log(` why: ${rationale}`);
   }
   console.log();
 }
@@ -333,7 +410,7 @@ async function cmdDemo(): Promise<void> {
   const directives = resolve(config.dataDir, "projects", DEMO_PROJECT_ID, "directives.json");
   const fs = await import("node:fs");
   if (fs.existsSync(directives)) {
-    console.log(`  directives served to the SDK:`);
+    console.log(` directives served to the SDK:`);
     console.log(
       fs
         .readFileSync(directives, "utf8")
@@ -344,12 +421,444 @@ async function cmdDemo(): Promise<void> {
     console.log(`  → Recursive.enabled("checkout-v2") now returns false in every browser.`);
     console.log(`  → No deploy. No code change. Reversible by one inverse operation.`);
   }
-  console.log(`\n  Run \`npm run cli -- audit --project ${DEMO_PROJECT_ID}\` for the decision trail.`);
+  console.log(
+    `\n  Run \`npm run cli -- audit --project ${DEMO_PROJECT_ID}\` for the decision trail.`,
+  );
+}
+
+async function cmdSweep(): Promise<void> {
+  const sub = process.argv[3];
+  const repoPath = arg("repo") ?? config.targetRepoPath;
+  if (!repoPath) {
+    console.error("Set --repo or TARGET_REPO_PATH.");
+    process.exit(1);
+  }
+
+  if (sub === "init") {
+    const fs = await import("node:fs");
+    const target = resolve(repoPath, "recursive.flows.json");
+    if (fs.existsSync(target) && !flag("force")) {
+      console.error(`${target} already exists. Pass --force to overwrite.`);
+      process.exit(1);
+    }
+    fs.writeFileSync(target, JSON.stringify(EXAMPLE_MANIFEST, null, 2) + "\n");
+    console.log(`Wrote ${target}`);
+    console.log(`\nEdit it to describe your real flows, then:`);
+    console.log(` npm run cli -- sweep daily --dry-run`);
+    return;
+  }
+
+  const mode = sub === "pr" ? "pr" : "daily";
+  const project = resolveProject(arg("project"));
+
+  const result = await sweep({
+    repoPath,
+    projectId: project.id,
+    mode,
+    baseRef: arg("base"),
+    maxFlows: arg("max") ? Number(arg("max")) : undefined,
+    headless: !flag("watch"),
+    dryRun: flag("dry-run"),
+    engine: (arg("engine") as "rhai" | "internal") ?? "internal",
+    concurrency: arg("concurrency") ? Number(arg("concurrency")) : undefined,
+  });
+
+  // A sweep that only reports is half the product. With --repair, every
+  // confirmed break goes straight into the closed loop: change the code,
+  // re-run the journey, check the server, repeat until it genuinely passes.
+  //
+  // Opt-in rather than default because it edits a repository and opens PRs,
+  // and CI gating (the common case for `sweep pr`) should stay read-only.
+  if (flag("repair") && result.confirmed.length > 0) {
+    const manifest = loadFlows(repoPath);
+    if (!manifest) {
+      console.error("No recursive.flows.json, cannot repair without the manifest.");
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log(`\n── TIER 1: REPAIR ─────────────────────────────────────`);
+    for (const confirmed of result.confirmed) {
+      console.log(`\n${confirmed.flow.name}`);
+      try {
+        const repair = await repairFlow({
+          projectId: project.id,
+          repoPath,
+          flow: confirmed.flow,
+          manifest,
+          failureSummary: confirmed.results.at(-1)?.summary ?? "flow failed",
+          transcript: confirmed.results.at(-1)?.transcript,
+          backend: confirmed.backend,
+          maxCycles: arg("cycles") ? Number(arg("cycles")) : undefined,
+          engine: (arg("engine") as "rhai" | "internal") ?? "internal",
+          headless: !flag("watch"),
+          baseBranch: arg("base"),
+          openPr: !flag("no-pr"),
+          dryRun: flag("dry-run"),
+          onProgress: (l) => console.log(l),
+        });
+        // A verified repair clears the CI failure for that flow; an unresolved
+        // one does not, and must keep the build red.
+        if (!repair.loop.resolved) process.exitCode = 1;
+      } catch (error) {
+        console.error(` repair failed: ${error instanceof Error ? error.message : error}`);
+        process.exitCode = 1;
+      }
+    }
+    return;
+  }
+
+  if (result.confirmed.length > 0) process.exitCode = 1; // fail CI on a real break
+}
+
+/**
+ * Repair one flow by name, without running a sweep first.
+ *
+ * The path a developer takes when they already know what is broken, and the
+ * one that makes the closed loop testable on its own, rather than only as the
+ * tail end of a twelve-minute sweep.
+ */
+async function cmdRepair(): Promise<void> {
+  const flowId = process.argv[3];
+  const repoPath = arg("repo") ?? config.targetRepoPath;
+
+  if (!flowId || flowId.startsWith("--")) {
+    console.error("Usage: repair FLOW_ID   (see `sweep init` for flow ids)");
+    process.exit(1);
+  }
+  if (!repoPath) {
+    console.error("Set --repo or TARGET_REPO_PATH.");
+    process.exit(1);
+  }
+
+  const manifest = loadFlows(repoPath);
+  if (!manifest) {
+    console.error(`No recursive.flows.json in ${repoPath}. Run \`sweep init\` first.`);
+    process.exit(1);
+  }
+
+  const flow = manifest.flows.find((f) => f.id === flowId);
+  if (!flow) {
+    console.error(
+      `No flow '${flowId}'. Known flows: ${manifest.flows.map((f) => f.id).join(", ")}`,
+    );
+    process.exit(1);
+  }
+
+  const project = resolveProject(arg("project"));
+  console.log(`\nRepairing '${flow.name}'${flag("dry-run") ? "  (dry run)" : ""}\n`);
+
+  const result = await repairFlow({
+    projectId: project.id,
+    repoPath,
+    flow,
+    manifest,
+    failureSummary: arg("because") ?? `${flow.name} is failing its expectation: ${flow.expect}`,
+    maxCycles: arg("cycles") ? Number(arg("cycles")) : undefined,
+    engine: (arg("engine") as "rhai" | "internal") ?? "internal",
+    headless: !flag("watch"),
+    baseBranch: arg("base"),
+    repairOnlyPaths: arg("only")
+      ?.split(",")
+      .map((p) => p.trim())
+      .filter(Boolean),
+    openPr: !flag("no-pr"),
+    dryRun: flag("dry-run"),
+    onProgress: (l) => console.log(l),
+  });
+
+  if (!result.loop.resolved) process.exitCode = 1;
+}
+
+async function cmdCohorts(): Promise<void> {
+  const dimension = (arg("dimension") ?? "Device") as Dimension;
+
+  // Prefer a snapshot that actually carries this dimension; the newest pull may
+  // have been URL-only.
+  const usable = store
+    .readAll()
+    .filter((s) => s.dimensions.includes(dimension) && s.dimensions.includes("URL"));
+  const snapshot = usable[usable.length - 1];
+
+  if (!snapshot) {
+    console.error(
+      `No snapshot with both URL and ${dimension}.\n` +
+        `Pull one with: npm run cli -- snapshot --dimensions URL,${dimension}`,
+    );
+    process.exit(1);
+  }
+
+  const findings = analyzeCohorts(snapshot, dimension, {
+    minSessions: arg("min-sessions") ? Number(arg("min-sessions")) : undefined,
+    minLift: arg("min-lift") ? Number(arg("min-lift")) : undefined,
+  });
+
+  console.log(
+    `\nCohort analysis, split by ${dimension}  (${snapshot.source} data, ${snapshot.fetchedAt.slice(0, 10)})\n`,
+  );
+  for (const line of explainAnalysis(snapshot, dimension, findings)) console.log(`  ${line}`);
+
+  if (findings.length === 0) return;
+
+  console.log(`\n${findings.length} cohort(s) significantly worse than everyone else:\n`);
+  for (const finding of findings) {
+    console.log(`  [${String(finding.severity).padStart(3)}] ${finding.summary}`);
+    console.log(
+      `        ${finding.cohortAffected}/${finding.cohortSessions} sessions vs ` +
+        `${finding.baselineAffected}/${finding.baselineSessions} elsewhere · ` +
+        `p=${finding.test.pValue < 1e-6 ? "<1e-6" : finding.test.pValue.toExponential(1)}`,
+    );
+    console.log();
+  }
+  console.log(`These flow into the same diagnose → fix → verify loop as everything else.`);
+}
+
+async function cmdMemory(): Promise<void> {
+  const project = resolveProject(arg("project"));
+  const sub = process.argv[3];
+
+  if (sub === "index") {
+    const repoPath = arg("repo") ?? config.targetRepoPath;
+    if (!repoPath) {
+      console.error("Set --repo or TARGET_REPO_PATH.");
+      process.exit(1);
+    }
+    console.log(`\nBuilding base memory for ${project.id}…\n`);
+    const result = await buildBaseMemory({
+      projectId: project.id,
+      repoPath,
+      enrichBudget: flag("no-enrich") ? 0 : arg("enrich") ? Number(arg("enrich")) : undefined,
+      incremental: !flag("full"),
+      onProgress: (line) => console.log(`  ${line}`),
+    });
+    console.log(`\n  ${result.filesIndexed} file(s) indexed, ${result.filesSkipped} unchanged`);
+    if (result.filesEnriched)
+      console.log(`  ${result.filesEnriched} enriched with model summaries`);
+    if (result.mostCentral.length) {
+      console.log(`\n  Most depended-on files (a bug here hurts most):`);
+      for (const file of result.mostCentral.slice(0, 6)) {
+        console.log(`    ${String(file.importedBy).padStart(3)} dependents  ${file.path}`);
+      }
+    }
+    const b = baseMemoryStats(project.id);
+    console.log(`\n  Base memory now covers ${b.files} file(s), ${b.enriched} with summaries.`);
+    console.log(
+      `  Areas: ${Object.entries(b.areas)
+        .map(([a, n]) => `${a}(${n})`)
+        .join(", ")}\n`,
+    );
+    return;
+  }
+
+  if (sub === "search") {
+    const query = process.argv[4];
+    if (!query) {
+      console.error('Usage: memory search "description of the failure"');
+      process.exit(1);
+    }
+    const found = findSimilarCases({
+      projectId: project.id,
+      fingerprint: "",
+      signalClass: arg("class") ?? "",
+      route: arg("route") ?? "",
+      message: query,
+      implicatedFiles: (arg("files") ?? "").split(",").filter(Boolean),
+    });
+
+    if (found.length === 0) {
+      console.log("Nothing similar in memory.");
+      return;
+    }
+    console.log(`\n${found.length} similar past failure(s):\n`);
+    for (const recalled of found) {
+      console.log(
+        `  ${(recalled.similarity * 100).toFixed(0)}%  ${recalled.failure.signalClass} on ${recalled.failure.route}` +
+          `  (${recalled.failure.at.slice(0, 10)}, matched by ${recalled.matchedBy.join(" + ")})`,
+      );
+      for (const reason of recalled.reasoning.slice(0, 2)) console.log(`         ${reason}`);
+      const kept = recalled.attempts.filter((a) => a.outcome === "kept");
+      const failed = recalled.attempts.filter((a) => a.outcome === "reverted");
+      if (kept.length) console.log(`         ✓ worked: ${kept.map((a) => a.approach).join("; ")}`);
+      if (failed.length)
+        console.log(`         ✗ failed: ${failed.map((a) => a.approach).join("; ")}`);
+      console.log();
+    }
+    return;
+  }
+
+  const base = baseMemoryStats(project.id);
+  const s = memoryStats(project.id);
+  console.log(`\nMemory for ${project.id}${s.oldest ? `, since ${s.oldest.slice(0, 10)}` : ""}\n`);
+  console.log(` code changes recorded   ${s.changes}`);
+  console.log(` failures recorded       ${s.failures}`);
+  console.log(` fix attempts            ${s.attempts}`);
+  console.log(` outcomes verified       ${s.outcomes}`);
+  console.log(` lessons learned         ${s.lessons}`);
+  console.log(`\n base memory (codebase)  ${base.files} file(s), ${base.enriched} with summaries`);
+  if (s.attemptSuccessRate !== null) {
+    console.log(` attempt success rate    ${(s.attemptSuccessRate * 100).toFixed(0)}%`);
+  }
+
+  const learned = allLessons(project.id);
+  if (learned.length) {
+    console.log(`\nWhat it has learned (most trusted first):\n`);
+    for (const lesson of learned.slice(0, 10)) {
+      console.log(`  [${lesson.confidence.toFixed(2)}] ${lesson.lesson}`);
+    }
+  }
+  console.log(`\nThis memory is append-only and is never deleted.\n`);
+}
+
+async function cmdRetrieve(): Promise<void> {
+  const repoPath = arg("repo") ?? config.targetRepoPath;
+  if (!repoPath) {
+    console.error("Set --repo or TARGET_REPO_PATH.");
+    process.exit(1);
+  }
+
+  const stackFile = arg("stack-file");
+  const stack = stackFile ? (await import("node:fs")).readFileSync(stackFile, "utf8") : undefined;
+  const at = arg("at");
+
+  const retriever = new Retriever(repoPath, resolveProject(arg("project")).id);
+  const started = Date.now();
+  const stats = retriever.build();
+  const indexMs = Date.now() - started;
+
+  console.log(`\nIndexed ${stats.files} file(s) → ${stats.chunks} chunk(s) in ${indexMs}ms\n`);
+
+  const context = await retriever.retrieve(
+    {
+      message: arg("message"),
+      stack,
+      selector: arg("selector"),
+      route: arg("route"),
+      failedAt: at ? new Date(at) : undefined,
+    },
+    { expandQuery: flag("expand"), rerank: flag("rerank") },
+  );
+
+  console.log("How it decided:");
+  for (const line of context.reasoning) console.log(`  • ${line}`);
+
+  if (context.suspectCommit) {
+    console.log(
+      `\nSuspect commit: ${context.suspectCommit.shortSha} "${context.suspectCommit.subject}" ` +
+        `(${context.suspectCommit.author})`,
+    );
+    if (context.changedFiles.length) {
+      console.log(` changed: ${context.changedFiles.join(", ")}`);
+    }
+  }
+
+  console.log(`\nTop results (~${context.approxTokens} tokens):\n`);
+  context.chunks.forEach((ranked, i) => {
+    console.log(
+      `  ${String(i + 1).padStart(2)}. ${ranked.chunk.path}:${ranked.chunk.startLine}-${ranked.chunk.endLine}` +
+        (ranked.chunk.symbol ? `  [${ranked.chunk.symbol}]` : ""),
+    );
+    console.log(` score ${ranked.score.toFixed(4)} via ${ranked.signals.join(" + ")}`);
+  });
+  console.log();
+}
+
+async function cmdHistory(): Promise<void> {
+  const repoPath = arg("repo") ?? config.targetRepoPath;
+  if (!repoPath) {
+    console.error("Set --repo or TARGET_REPO_PATH.");
+    process.exit(1);
+  }
+
+  const repo = new Repo(repoPath);
+  if (!repo.isRepo()) {
+    console.error(`${repoPath} is not a git repository.`);
+    process.exit(1);
+  }
+
+  console.log(`\n${repoPath}  (branch ${repo.currentBranch()}, HEAD ${repo.head().slice(0, 8)})\n`);
+
+  const releases = derivedReleases(repo, 8);
+  console.log(
+    `Releases, derived from ${releases[0]?.tagged ? "git tags" : "commit history (no tags found)"}:`,
+  );
+  for (const release of releases.slice(0, 8)) {
+    console.log(
+      `  ${release.id.padEnd(14)} ${release.at.slice(0, 19)}  ${release.subject.slice(0, 60)}`,
+    );
+  }
+
+  const churn = [...repo.churn(30)].sort((a, b) => b[1] - a[1]).slice(0, 10);
+  if (churn.length) {
+    console.log(`\nMost-changed files (last 30 days), a weak prior on where bugs live:`);
+    for (const [path, count] of churn) {
+      console.log(`  ${String(count).padStart(3)} changes  ${path}`);
+    }
+  }
+  console.log();
+}
+
+async function cmdEngines(): Promise<void> {
+  const provider = describeProvider();
+  console.log(`\nReasoning model, query expansion, reranking, investigation.\n`);
+  console.log(` provider   ${provider.name}`);
+  console.log(` model      ${provider.model}`);
+  console.log(
+    ` egress     ${provider.selfHosted ? "none: runs inside your network" : "prompts reach the provider API"}`,
+  );
+  try {
+    await resolveProvider().preflight();
+    console.log(` status     ✓ reachable`);
+  } catch (error) {
+    console.log(` status     ✗ ${error instanceof Error ? error.message.split("\n")[0] : error}`);
+  }
+
+  console.log(`\nCode-edit engines, which agent modifies customer repositories.\n`);
+  for (const engine of describeEngines()) {
+    console.log(`  ${engine.active ? "▸" : " "} ${engine.name}`);
+    console.log(` licence        ${engine.licence}`);
+    console.log(
+      ` zero-egress    ${engine.selfContained ? "yes: can run entirely inside a customer network" : "no: prompts reach the model API (source code does not)"}`,
+    );
+  }
+  console.log(`\n  Active: ${config.fixEngine}   (set FIX_ENGINE to change)`);
+  if (config.fixEngine === "openhands") {
+    console.log(
+      `  Model:  ${config.openHandsModel}${config.openHandsBaseUrl ? ` @ ${config.openHandsBaseUrl}` : ""}`,
+    );
+  }
+
+  // Report real usability, not just what's configured, a customer who picked an
+  // engine they haven't installed should find out here, not mid-hill-climb.
+  console.log();
+  for (const name of ["claude-agent-sdk", "openhands"] as const) {
+    try {
+      await resolveFixer(name).preflight();
+      console.log(`  ✓ ${name} is ready`);
+    } catch (error) {
+      console.log(`  ✗ ${name}: ${error instanceof Error ? error.message.split("\n")[0] : error}`);
+    }
+  }
+  console.log();
 }
 
 async function main(): Promise<void> {
   const command = process.argv[2];
   switch (command) {
+    case "repair":
+      await cmdRepair();
+      break;
+    case "sweep":
+      return cmdSweep();
+    case "cohorts":
+      return cmdCohorts();
+    case "memory":
+      return cmdMemory();
+    case "retrieve":
+      return cmdRetrieve();
+    case "history":
+      return cmdHistory();
+    case "engines":
+      return cmdEngines();
     case "projects":
       return cmdProjects();
     case "ingest":

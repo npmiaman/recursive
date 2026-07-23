@@ -4,7 +4,7 @@
  *
  * Endpoint: GET https://www.clarity.ms/export-data/api/v1/project-live-insights
  * Auth:     Authorization: Bearer <JWT>
- * Params:   numOfDays (1|2|3), dimension1, dimension2, dimension3
+ * Params: numOfDays (1|2|3), dimension1, dimension2, dimension3
  */
 
 /** The exact dimension values the API accepts. Anything else is a 400. */
@@ -63,7 +63,7 @@ export function isFrictionMetric(name: string): name is FrictionMetric {
 /**
  * A single row inside a metric's `information` array. The API returns a loose
  * bag of fields that varies by metric and by which dimensions were requested,
- * so this is intentionally permissive — the known numeric fields are typed and
+ * so this is intentionally permissive, the known numeric fields are typed and
  * dimension values arrive as extra string keys.
  */
 export interface ClarityRow {

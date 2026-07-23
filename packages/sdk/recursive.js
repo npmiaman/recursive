@@ -1,12 +1,12 @@
 /**
- * @recursive/sdk — the browser agent installed into a customer's application.
+ * @recursive/sdk, the browser agent installed into a customer's application.
  *
  *   <script src="/recursive.js"></script>
  *   <script>
  *     Recursive.init({
- *       projectId: "acme-web",
- *       endpoint: "https://ingest.recursive.dev/v1/signals",
- *       release: "2026.07.23-a1b2c3",
+ * projectId: "acme-web",
+ * endpoint: "https://ingest.recursive.dev/v1/signals",
+ * release: "2026.07.23-a1b2c3",
  *     });
  *   </script>
  *
@@ -18,7 +18,7 @@
  * host API is replaced without delegating to the original, and no network
  * failure is ever surfaced. That property is worth more than every feature here.
  *
- * Deliberately dependency-free and framework-agnostic — this runs in other
+ * Deliberately dependency-free and framework-agnostic, this runs in other
  * people's build pipelines.
  */
 (function (global) {
@@ -77,7 +77,7 @@
         return true;
       }
     } catch (_) {
-      /* storage can throw in private mode — treat as not disabled */
+      /* storage can throw in private mode, treat as not disabled */
     }
     return false;
   }
@@ -86,12 +86,21 @@
 
   // PII is redacted here, in the customer's own process, BEFORE transmission.
   // We should never be in a position to leak what we never received.
+  // ORDER IS LOAD-BEARING, specific patterns before greedy ones, or a greedy
+  // pattern wins and mislabels, or partially matches and leaves the secret
+  // behind. Must stay in sync with SCRUBBERS in src/detect/ingest.ts, which is
+  // the second, server-side pass over the same data.
   var SCRUBBERS = [
-    [/[\w.+-]+@[\w-]+\.[\w.]+/g, "<email>"],
-    [/\b\d{13,19}\b/g, "<card>"],
     [/\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "<jwt>"],
-    [/\b(?:sk|pk|ghp|xox[baprs])[-_][A-Za-z0-9]{16,}\b/g, "<token>"],
-    [/(authorization|api[-_]?key|password|secret|token)["'\s:=]+\S+/gi, "$1=<redacted>"],
+    [/\b(?:sk|pk|rk|ghp|gho|ghs|ghu|xox[baprs])[-_][A-Za-z0-9_-]{12,}\b/gi, "<token>"],
+    [/\b(?:bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "<auth>"],
+    [
+      /\b(authorization|api[-_]?key|apikey|password|passwd|pwd|secret|token|credential|session[-_]?id)\b\s*["']?\s*[:=]\s*["']?[^\s"',;)}\]]{4,}/gi,
+      "$1=<redacted>",
+    ],
+    [/\b\d{13,19}\b/g, "<card>"],
+    [/[\w.+-]+@[\w-]+\.[\w.]+/g, "<email>"],
+    [/\b\+?\d{1,3}[\s-]?\d{3,5}[\s-]?\d{3,5}\b/g, "<phone>"],
   ];
 
   function scrub(text) {
@@ -184,14 +193,18 @@
           /* telemetry failure is never surfaced to the host app */
         });
     } catch (_) {
-      /* no fetch available — drop silently */
+      /* no fetch available, drop silently */
     }
   }, "flush");
 
   function sessionInfo() {
     try {
       var ua = global.navigator.userAgent || "";
-      var device = /Mobi|Android/i.test(ua) ? "mobile" : /Tablet|iPad/i.test(ua) ? "tablet" : "desktop";
+      var device = /Mobi|Android/i.test(ua)
+        ? "mobile"
+        : /Tablet|iPad/i.test(ua)
+          ? "tablet"
+          : "desktop";
       var browser = /Edg\//.test(ua)
         ? "Edge"
         : /Chrome\//.test(ua)
@@ -203,7 +216,17 @@
               : "Other";
       return {
         browser: browser,
-        os: /Windows/.test(ua) ? "Windows" : /Mac OS/.test(ua) ? "macOS" : /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Linux/.test(ua) ? "Linux" : "Other",
+        os: /Windows/.test(ua)
+          ? "Windows"
+          : /Mac OS/.test(ua)
+            ? "macOS"
+            : /Android/.test(ua)
+              ? "Android"
+              : /iPhone|iPad/.test(ua)
+                ? "iOS"
+                : /Linux/.test(ua)
+                  ? "Linux"
+                  : "Other",
         device: device,
         locale: global.navigator.language,
       };
@@ -221,7 +244,8 @@
         // Resource load failures have no `error` object; they're still signal.
         if (!e.error && e.target && e.target !== global) {
           record("failed-request", {
-            message: "Resource failed to load: " + scrub(String(e.target.src || e.target.href || "")),
+            message:
+              "Resource failed to load: " + scrub(String(e.target.src || e.target.href || "")),
           });
           return;
         }
@@ -255,7 +279,7 @@
       } catch (_) {
         url = undefined;
       }
-      // Never instrument our own telemetry — that path must not recurse.
+      // Never instrument our own telemetry, that path must not recurse.
       if (url && config.endpoint && String(url).indexOf(config.endpoint) === 0) {
         return nativeFetch(input, init);
       }
@@ -277,7 +301,7 @@
               stack: scrub(error && error.stack),
             });
           } catch (_) {}
-          // Rethrow — we observe, we never change host behaviour.
+          // Rethrow, we observe, we never change host behaviour.
           throw error;
         },
       );
@@ -296,7 +320,7 @@
    *
    * This is the part conventional error tracking has no equivalent for: nothing
    * throws, so nothing is reported, and the defect survives for weeks. We click-
-   * watch instead — if an interaction produces no DOM mutation, no network
+   * watch instead, if an interaction produces no DOM mutation, no network
    * request and no navigation within the threshold, the user got nothing back.
    */
   function installInteractionCapture() {
@@ -310,13 +334,18 @@
       var startObserving = function () {
         var root = global.document.documentElement || global.document.body;
         if (root) {
-          observer.observe(root, { childList: true, subtree: true, attributes: true, characterData: true });
+          observer.observe(root, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            characterData: true,
+          });
         }
       };
       if (global.document.documentElement) startObserving();
       else global.document.addEventListener("DOMContentLoaded", startObserving, { once: true });
     } catch (_) {
-      /* no MutationObserver — dead-click detection degrades, everything else works */
+      /* no MutationObserver, dead-click detection degrades, everything else works */
     }
 
     // Count requests via a lightweight hook that delegates to whatever fetch is
@@ -396,7 +425,12 @@
         if (global.document.visibilityState === "hidden") flush(true);
       }, "visibilitychange"),
     );
-    global.addEventListener("pagehide", safe(function () { flush(true); }, "pagehide"));
+    global.addEventListener(
+      "pagehide",
+      safe(function () {
+        flush(true);
+      }, "pagehide"),
+    );
   }
 
   // ------------------------------------------------------------ flags
@@ -406,7 +440,7 @@
    *
    * The host wraps risky features in `Recursive.enabled("checkout-v2")`. When
    * Recursive contains an incident, it flips that flag off and the feature stops
-   * running — no deploy, no code change, reversible by a single inverse operation.
+   * running, no deploy, no code change, reversible by a single inverse operation.
    *
    * Defaults to ENABLED on any failure to resolve. An unreachable Recursive must
    * never dark-launch a customer's working feature.
@@ -432,14 +466,18 @@
 
   var refreshDirectives = safe(function refreshDirectives() {
     if (!config.endpoint || autonomyDisabledLocally()) return;
-    var url = config.endpoint.replace(/\/signals$/, "/directives") +
-      "?projectId=" + encodeURIComponent(config.projectId);
+    var url =
+      config.endpoint.replace(/\/signals$/, "/directives") +
+      "?projectId=" +
+      encodeURIComponent(config.projectId);
     global
       .fetch(url, { credentials: "omit", mode: "cors" })
-      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (r) {
+        return r.ok ? r.json() : null;
+      })
       .then(applyDirectives)
       .catch(function () {
-        /* fail open — keep whatever flag state we already have */
+        /* fail open, keep whatever flag state we already have */
       });
   }, "refreshDirectives");
 
@@ -465,7 +503,12 @@
     installInteractionCapture();
     installLifecycle();
 
-    global.setInterval(safe(function () { flush(false); }, "tick"), config.flushIntervalMs);
+    global.setInterval(
+      safe(function () {
+        flush(false);
+      }, "tick"),
+      config.flushIntervalMs,
+    );
     refreshDirectives();
     global.setInterval(refreshDirectives, 60000);
   }, "init");
@@ -474,12 +517,15 @@
     version: VERSION,
     init: init,
     enabled: enabled,
-    flush: function () { flush(false); },
+    flush: function () {
+      flush(false);
+    },
     /** Explicit health beacon for critical paths: Recursive.check("checkout", ok) */
     check: safe(function (name, ok, detail) {
       if (!ok) {
         record("health-check-failed", {
-          message: "Health check '" + name + "' failed" + (detail ? ": " + scrub(String(detail)) : ""),
+          message:
+            "Health check '" + name + "' failed" + (detail ? ": " + scrub(String(detail)) : ""),
         });
       }
     }, "check"),

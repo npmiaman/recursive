@@ -8,14 +8,14 @@ import { readShipped, writeShipped, type ShippedFix } from "./ship.ts";
 import type { IssueKind } from "../diagnose/issues.ts";
 
 /**
- * The outer loop — the slow, real one.
+ * The outer loop, the slow, real one.
  *
  * The inner loop optimizes a proxy. Proxies drift, and an unchecked proxy is
  * how an automated system ends up confidently shipping changes that make the
  * product worse. This loop closes that gap: days after a fix ships, it re-samples
  * Clarity and asks whether the real metric actually moved.
  *
- * It then does something more valuable than pass/fail — it records whether the
+ * It then does something more valuable than pass/fail, it records whether the
  * proxy *predicted* the real outcome, per issue kind. That calibration record is
  * how the probe weights earn or lose trust over time.
  */
@@ -71,10 +71,9 @@ function updateCalibration(fix: ShippedFix, verdict: ShippedFix["verification"])
   else if (verdict.verdict === "regressed") entry.harmful++;
 
   const total = entry.confirmed + entry.falsePositive + entry.harmful;
-  // Harmful outcomes cost double — a probe that leads to regressions is worse
+  // Harmful outcomes cost double, a probe that leads to regressions is worse
   // than one that leads nowhere.
-  entry.trust =
-    total === 0 ? 1 : Math.max(0, (entry.confirmed - entry.harmful) / total);
+  entry.trust = total === 0 ? 1 : Math.max(0, (entry.confirmed - entry.harmful) / total);
 
   all[kind] = entry;
   writeCalibration(all);
@@ -96,7 +95,7 @@ export interface VerifyReport {
  * Re-sample Clarity and settle up on every shipped fix that has had time to
  * accumulate traffic.
  *
- * Spends from the reserved half of the daily budget — verification is the one
+ * Spends from the reserved half of the daily budget, verification is the one
  * call the system must always be able to make, since an unverified fix is worse
  * than no fix.
  */
@@ -123,7 +122,7 @@ export async function verify(options: VerifyOptions = {}): Promise<VerifyReport>
 
   log(`Verifying ${pending.length} shipped fix(es) against fresh Clarity data…`);
 
-  // One pull covers every pending fix — the response is already broken down by URL.
+  // One pull covers every pending fix, the response is already broken down by URL.
   const snapshot = await fetchInsights({
     numOfDays: 3,
     dimensions: ["URL"],
@@ -144,7 +143,7 @@ export async function verify(options: VerifyOptions = {}): Promise<VerifyReport>
     let verdict: NonNullable<ShippedFix["verification"]>;
 
     if (!now) {
-      // The issue vanished from the data entirely — either fully fixed or the
+      // The issue vanished from the data entirely, either fully fixed or the
       // page stopped getting traffic. Both are plausible; don't overclaim.
       verdict = {
         verifiedAt: new Date().toISOString(),
@@ -181,9 +180,9 @@ export async function verify(options: VerifyOptions = {}): Promise<VerifyReport>
     const symbol =
       verdict.verdict === "confirmed" ? "✓" : verdict.verdict === "regressed" ? "✗" : "~";
     log(`  ${symbol} ${fix.kind} on ${fix.url}`);
-    log(`      probe ${fix.probeBefore.toFixed(4)} → ${fix.probeAfter.toFixed(4)}`);
+    log(` probe ${fix.probeBefore.toFixed(4)} → ${fix.probeAfter.toFixed(4)}`);
     log(
-      `      clarity ${(fix.clarityRateBefore * 100).toFixed(2)}% → ${(verdict.clarityRateAfter * 100).toFixed(2)}%  [${verdict.verdict}]`,
+      ` clarity ${(fix.clarityRateBefore * 100).toFixed(2)}% → ${(verdict.clarityRateAfter * 100).toFixed(2)}%  [${verdict.verdict}]`,
     );
     log(`      ${verdict.note}`);
   }
@@ -193,7 +192,7 @@ export async function verify(options: VerifyOptions = {}): Promise<VerifyReport>
   const calibration = readCalibration();
   const untrusted = Object.values(calibration).filter((c) => c.trust < 0.5);
   if (untrusted.length) {
-    log(`\n⚠ Probe calibration warning — these probes are not predicting reality well:`);
+    log(`\n⚠ Probe calibration warning, these probes are not predicting reality well:`);
     for (const c of untrusted) {
       log(
         `    ${c.kind}: trust ${c.trust.toFixed(2)} ` +

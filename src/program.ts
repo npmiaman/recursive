@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { ROOT } from "./config.ts";
 
 /**
- * Loads program.md — the human-authored steering file.
+ * Loads program.md, the human-authored steering file.
  *
  * This mirrors autoresearch's core idea: the human's job is not to write the
  * loop, it's to write the research directions. Everything in program.md is
@@ -21,7 +21,7 @@ export function loadProgram(): string | null {
     return cached;
   }
   const raw = readFileSync(path, "utf8").trim();
-  // Strip HTML comments — they're authoring hints for the human, not the model.
+  // Strip HTML comments, they're authoring hints for the human, not the model.
   cached = raw.replace(/<!--[\s\S]*?-->/g, "").trim() || null;
   return cached;
 }
@@ -30,5 +30,5 @@ export function loadProgram(): string | null {
 export function programSection(): string {
   const program = loadProgram();
   if (!program) return "";
-  return `\n## Product context and constraints (program.md — authored by the team, treat as binding)\n\n${program}\n`;
+  return `\n## Product context and constraints (program.md, authored by the team, treat as binding)\n\n${program}\n`;
 }

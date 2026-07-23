@@ -6,7 +6,7 @@ import { evaluate, INVERSE, type ActionKind, type ProposedAction } from "./guard
 import { deployProviderFor, flagProviderFor } from "./providers.ts";
 
 /**
- * Tier 0 — contain.
+ * Tier 0, contain.
  *
  * Turn the broken thing off. No AI, no code written, reversible by a single
  * inverse operation, seconds not minutes. This is where most of the value of
@@ -45,9 +45,7 @@ function estimateFlagBlastRadius(projectId: string, flag: string, windowMs: numb
   const signals = readSignals(projectId, windowMs);
   if (signals.length === 0) return 100;
   const total = signals.reduce((sum, s) => sum + s.sessions, 0);
-  const withFlag = signals
-    .filter((s) => s.flag === flag)
-    .reduce((sum, s) => sum + s.sessions, 0);
+  const withFlag = signals.filter((s) => s.flag === flag).reduce((sum, s) => sum + s.sessions, 0);
   if (total === 0) return 100;
   return Math.min(100, (withFlag / total) * 100);
 }
@@ -63,6 +61,17 @@ function proposeAction(
   incident: Incident,
   windowMs: number,
 ): ProposedAction | undefined {
+  // Core paths are repair-only.
+  //
+  // Containment assumes a fallback exists. For core functionality it usually
+  // doesn't, switching off checkout is not a milder form of broken checkout,
+  // it's the same outage with a different cause. Repair is the ONLY acceptable
+  // response on these paths, so don't waste a guardrail slot proposing one.
+  const repairOnly = project.guardrails.repairOnlyPaths.some((prefix) =>
+    incident.route.startsWith(prefix),
+  );
+  if (repairOnly) return undefined;
+
   // Narrowest containment: one feature off.
   if (incident.flag) {
     return {
@@ -95,7 +104,7 @@ function proposeAction(
     };
   }
 
-  // Nothing recent and nothing flag-scoped — there is no safe containment.
+  // Nothing recent and nothing flag-scoped, there is no safe containment.
   // This is a Tier 1 case: diagnose and propose a fix for a human.
   return undefined;
 }
@@ -138,42 +147,75 @@ export async function heal(project: Project, options: HealOptions = {}): Promise
 
   log(`${incidents.length} incident(s) in the last ${Math.round(windowMs / 60000)}m:\n`);
 
+  /**
+   * Containment targets already acted on in this pass.
+   *
+   * One root cause routinely produces several incidents, a broken button emits
+   * both dead-click and rage-click signals, which fingerprint separately. They
+   * resolve to the SAME containment. Without this, the second incident re-fires
+   * the same flag-off: a duplicate audit entry, a wasted slot against the
+   * hourly rate limit, and a log that misrepresents what happened. The
+   * per-incident cooldown does not catch it, because these are different incidents.
+   */
+  const containedTargets = new Set<string>();
+
   for (const incident of incidents) {
     log(`  ${describeIncident(incident)}`);
     upsertIncident(project.id, incident);
 
     if (incident.status === "contained" || incident.status === "resolved") {
-      log(`    already ${incident.status} — skipping`);
+      log(` already ${incident.status}, skipping`);
       continue;
     }
 
     if (incident.severity < ACTION_SEVERITY_FLOOR) {
-      log(`    severity below action floor (${ACTION_SEVERITY_FLOOR}) — monitoring only`);
+      log(` severity below action floor (${ACTION_SEVERITY_FLOOR}), monitoring only`);
       continue;
     }
 
     const action = proposeAction(project, incident, windowMs);
 
     if (!action) {
-      log(`    no safe containment available — escalating to Tier 1 (diagnose + PR)`);
-      upsertIncident(project.id, { ...incident, status: "escalated" });
+      const repairOnly = project.guardrails.repairOnlyPaths.some((p) =>
+        incident.route.startsWith(p),
+      );
+      const reason = repairOnly
+        ? `'${incident.route}' is a repair-only path, switching core functionality off is not a fix.`
+        : "No flag implicated and no release correlation, nothing reversible to contain.";
+
+      log(
+        `    ${repairOnly ? "repair-only path" : "no safe containment"}, routing to repair (diagnose + fix + PR)`,
+      );
+      upsertIncident(project.id, { ...incident, status: "repairing" });
       audit({
         at: new Date().toISOString(),
         projectId: project.id,
-        action: "escalate",
+        action: "route-to-repair",
         incidentId: incident.id,
         actor: "system",
-        detail: {
-          reason: "No flag implicated and no release correlation — nothing reversible to contain.",
-          reasoning: incident.reasoning,
-        },
+        detail: { reason, reasoning: incident.reasoning },
         outcome: "executed",
       });
       outcomes.push({ incident, executed: false, blockedBy: ["no containment available"] });
       continue;
     }
 
-    log(`    proposed: ${action.kind} → '${action.target}' (blast radius ${action.blastRadiusPct.toFixed(0)}%)`);
+    log(
+      ` proposed: ${action.kind} → '${action.target}' (blast radius ${action.blastRadiusPct.toFixed(0)}%)`,
+    );
+
+    const targetKey = `${action.kind}:${action.target}`;
+    if (containedTargets.has(targetKey)) {
+      log(`    ↳ already contained by an earlier incident in this pass, no second action`);
+      upsertIncident(project.id, { ...incident, status: "contained" });
+      outcomes.push({
+        incident,
+        action,
+        executed: false,
+        blockedBy: ["already contained this pass"],
+      });
+      continue;
+    }
 
     const verdict = evaluate(project, action);
 
@@ -201,14 +243,20 @@ export async function heal(project: Project, options: HealOptions = {}): Promise
     }
 
     if (options.dryRun) {
-      log(`    ✓ would execute (dry run) — all ${verdict.passed.length} guardrail checks passed`);
+      // Mark it too, so a dry run reports the same dedup behaviour a real run
+      // would, otherwise the preview overstates how many actions would fire.
+      containedTargets.add(targetKey);
+      log(`    ✓ would execute (dry run), all ${verdict.passed.length} guardrail checks passed`);
       outcomes.push({ incident, action, executed: false, blockedBy: [] });
       continue;
     }
 
     try {
       await execute(project, action);
-      log(`    ✓ EXECUTED ${action.kind} on '${action.target}' — reversible via ${INVERSE[action.kind]}`);
+      containedTargets.add(targetKey);
+      log(
+        `    ✓ EXECUTED ${action.kind} on '${action.target}', reversible via ${INVERSE[action.kind]}`,
+      );
       audit({
         at: new Date().toISOString(),
         projectId: project.id,
@@ -252,7 +300,7 @@ export async function heal(project: Project, options: HealOptions = {}): Promise
  *
  * An autonomous system that cannot tell whether it helped is not safe to run
  * (ARCHITECTURE.md §7). For every executed action, check whether the incident's
- * signal rate fell after we acted. If it didn't, the containment was wrong — say
+ * signal rate fell after we acted. If it didn't, the containment was wrong, say
  * so, and escalate rather than quietly leaving the feature off.
  */
 export interface ContainmentCheck {
@@ -308,7 +356,7 @@ export function verifyContainment(project: Project, windowMs = 1800_000): Contai
       note: worked
         ? `Signal fell from ${before} to ${after} sessions after containment. Working as intended.`
         : `Signal did NOT fall (${before} → ${after}) after ${record.action}. The containment did not address ` +
-          `the cause — the action should be reverted and the incident escalated to a human.`,
+          `the cause, the action should be reverted and the incident escalated to a human.`,
     });
 
     if (!worked) {

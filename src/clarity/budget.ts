@@ -7,7 +7,7 @@ import { config } from "../config.ts";
  * Exceeding it returns 429 and you are blind until the window resets.
  *
  * That budget is the hard constraint the whole system is designed around, so it
- * is enforced by a ledger on disk rather than an in-memory counter — otherwise
+ * is enforced by a ledger on disk rather than an in-memory counter, otherwise
  * two CLI invocations (or a crashed loop that restarts) would each think they
  * had a fresh 10.
  *
@@ -44,7 +44,7 @@ function read(): Ledger {
     if (parsed.date !== today) return { date: today, spent: 0, calls: [] };
     return parsed;
   } catch {
-    // A corrupt ledger must not hand out a fresh budget — assume the worst and
+    // A corrupt ledger must not hand out a fresh budget, assume the worst and
     // treat the day as fully spent until a human clears the file.
     console.warn("[budget] ledger unreadable; treating today as exhausted.");
     return { date: today, spent: DAILY_LIMIT, calls: [] };
@@ -92,11 +92,7 @@ export class BudgetExhaustedError extends Error {
  * `priority: "reserved"` may dip into the verification reserve; everything else
  * stops short of it so the outer loop can always confirm a shipped fix.
  */
-export function spend(
-  label: string,
-  count = 1,
-  priority: "normal" | "reserved" = "normal",
-): void {
+export function spend(label: string, count = 1, priority: "normal" | "reserved" = "normal"): void {
   const ledger = read();
   const floor = priority === "reserved" ? 0 : RESERVE_FOR_VERIFICATION;
   const usable = Math.max(0, DAILY_LIMIT - floor - ledger.spent);

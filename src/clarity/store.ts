@@ -8,7 +8,7 @@ import type { Snapshot } from "./types.ts";
  *
  * This file is the reason the system works at all. The API only looks back 1-3
  * days and only answers 10 times a day, so trend detection ("rage clicks on
- * /checkout tripled this week") is impossible against the API directly — it is
+ * /checkout tripled this week") is impossible against the API directly, it is
  * only possible against an accumulated local history. Every analysis reads from
  * here; nothing but `snapshot` touches the network.
  */
@@ -46,7 +46,7 @@ export function latest(): Snapshot | undefined {
 }
 
 /**
- * The snapshot closest to `daysAgo` days before now — the baseline the outer
+ * The snapshot closest to `daysAgo` days before now, the baseline the outer
  * loop compares against when deciding whether a shipped fix actually worked.
  */
 export function nearest(daysAgo: number): Snapshot | undefined {

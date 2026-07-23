@@ -15,7 +15,13 @@
     "diagnose": "npm run cli -- diagnose",
     "score": "npm run cli -- score",
     "fix": "npm run cli -- fix",
-    "verify": "npm run cli -- verify"
+    "verify": "npm run cli -- verify",
+    "test": "node --experimental-strip-types --no-warnings test/scrub.test.ts && node --experimental-strip-types --no-warnings test/retrieve.test.ts && node --experimental-strip-types --no-warnings test/memory.test.ts && node --experimental-strip-types --no-warnings test/cohort.test.ts",
+    "test:browse": "node --experimental-strip-types --no-warnings test/browse.test.ts",
+    "eval:retrieve": "node --experimental-strip-types --no-warnings test/retrieve-eval.ts",
+    "test:loop": "node --experimental-strip-types --no-warnings test/closed-loop.test.ts",
+    "test:all": "npm run test && npm run test:loop",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"apps/web/**/*.{ts,tsx}\""
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",

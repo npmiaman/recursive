@@ -13,7 +13,7 @@ import {
  *
  * The single most useful correlation is the **release boundary**. If a signal
  * class appears within minutes of a deploy and was absent before it, the cause is
- * almost certainly that deploy — and the containment is a rollback, requiring no
+ * almost certainly that deploy, and the containment is a rollback, requiring no
  * diagnosis at all. That is what makes Tier 0 both fast and safe: most production
  * breakage is recent change, and recent change is revertible.
  *
@@ -53,7 +53,7 @@ function dominant<T extends string>(values: (T | undefined)[]): T | undefined {
       bestCount = count;
     }
   }
-  // Only call it dominant if it actually dominates — otherwise the cohort is
+  // Only call it dominant if it actually dominates, otherwise the cohort is
   // mixed and narrowing containment to it would be wrong.
   return bestCount / total >= 0.8 ? best : undefined;
 }
@@ -72,7 +72,7 @@ function severityOf(input: {
   const classWeight = isSilent(input.cls) ? 0.75 : 1.0;
 
   // Something that started just now, right after a deploy, is the highest-value
-  // thing to act on — it is both most likely real and most cheaply reversible.
+  // thing to act on, it is both most likely real and most cheaply reversible.
   const recency = input.releaseCorrelated ? 1.35 : input.novel ? 1.15 : 1.0;
 
   return Math.max(0, Math.min(100, 100 * classWeight * reach * recency));
@@ -106,10 +106,10 @@ function assessConfidence(input: {
     reasoning.push("Confined to a single browser/device cohort.");
   }
   if (input.routes > 1) {
-    reasoning.push(`Spans ${input.routes} routes — cause may be shared infrastructure.`);
+    reasoning.push(`Spans ${input.routes} routes, cause may be shared infrastructure.`);
   }
   if (input.sessions < 10) {
-    reasoning.push(`Only ${input.sessions} sessions affected — small sample.`);
+    reasoning.push(`Only ${input.sessions} sessions affected, small sample.`);
   }
 
   // High: we can name the cause and the containment is obvious.
@@ -128,8 +128,7 @@ function assessConfidence(input: {
     return { confidence: "medium", reasoning };
   }
 
-  // Low: long-standing or diffuse. Diagnose it; do not contain it automatically —
-  // there is nothing recent to revert, so any action is a guess.
+  // Low: long-standing or diffuse. Diagnose it; do not contain it automatically, // there is nothing recent to revert, so any action is a guess.
   reasoning.push("→ low: not novel and not release-correlated; no obvious containment.");
   return { confidence: "low", reasoning };
 }
@@ -171,14 +170,12 @@ export function correlate(projectId: string, options: CorrelateOptions = {}): In
     const novel = !priorFingerprints.has(fp);
 
     // Attribute to a release only if one landed shortly before the first signal
-    // AND the fingerprint is new — a pre-existing defect that happens to follow a
+    // AND the fingerprint is new, a pre-existing defect that happens to follow a
     // deploy is not caused by it, and rolling back would not help.
-    const precedingRelease = [...releases]
-      .reverse()
-      .find((r) => {
-        const dt = firstSeenMs - Date.parse(r.at);
-        return dt >= 0 && dt <= RELEASE_CORRELATION_WINDOW_MS;
-      });
+    const precedingRelease = [...releases].reverse().find((r) => {
+      const dt = firstSeenMs - Date.parse(r.at);
+      return dt >= 0 && dt <= RELEASE_CORRELATION_WINDOW_MS;
+    });
     const releaseCorrelated = Boolean(precedingRelease) && novel;
 
     const flag = dominant(signals.map((s) => s.flag));
@@ -241,7 +238,7 @@ export function describeIncident(incident: Incident): string {
   ].filter(Boolean);
 
   return (
-    `[${incident.severity.toFixed(0)}] ${incident.class} on ${incident.route} — ` +
+    `[${incident.severity.toFixed(0)}] ${incident.class} on ${incident.route}, ` +
     `${incident.affectedSessions} session(s), confidence ${incident.confidence}` +
     (tags.length ? ` (${tags.join(", ")})` : "")
   );

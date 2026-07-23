@@ -2,24 +2,40 @@ import { appendFileSync, readFileSync, existsSync, mkdirSync, writeFileSync } fr
 import { resolve } from "node:path";
 import { config } from "../config.ts";
 import * as git from "../git.ts";
+import { Repo } from "../repo/git.ts";
+import { classifyChange, describeBreakdown, type Area } from "../repo/areas.ts";
+import {
+  checkoutAreaBranch,
+  cherryPick,
+  commentOnPullRequest,
+  hasRemote,
+  push,
+  upsertPullRequest,
+} from "../repo/branch.ts";
 import type { RunResult } from "./inner.ts";
 
 /**
- * The PR stage, plus the shipped-fix registry the outer verification loop reads.
+ * The ship stage.
  *
- * The registry is what closes the loop. Without a durable record of "this PR
- * claimed to fix this issue on this date, and the probe score moved this much",
- * there is no way to later ask Clarity whether the claim was true.
+ * Fixes land on a long-lived branch per area of the system, `recursive/frontend`,
+ * `recursive/backend`, `recursive/ml`, reused across runs rather than a new
+ * branch per bug. One accumulating PR per area, reviewed by the people who own
+ * that area, is how a team actually works. A PR per bug just buries them.
+ *
+ * The area can only be determined *after* the fix, from the files it touched, so
+ * the hill-climb runs on the working branch and the accepted commits are
+ * transplanted here.
  */
 
 export interface ShippedFix {
   issueId: string;
   url: string;
   kind: string;
+  area: Area;
   branch: string;
   prUrl?: string;
+  prNumber?: number;
   shippedAt: string;
-  /** Clarity friction rate at the time of shipping — the number we expect to fall. */
   clarityRateBefore: number;
   affectedSessionsBefore: number;
   probeBefore: number;
@@ -58,66 +74,49 @@ export function readShipped(): ShippedFix[] {
     });
 }
 
-/** Rewrite the registry in place — used when verification results are attached. */
 export function writeShipped(all: ShippedFix[]): void {
   mkdirSync(config.dataDir, { recursive: true });
   writeFileSync(registryPath(), all.map((f) => JSON.stringify(f)).join("\n") + "\n");
 }
 
-function slug(input: string): string {
-  return input.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase().slice(0, 40);
-}
+function fixSummary(result: RunResult, area: Area, breakdown: string): string {
+  const { issue, baseline, final, investigation } = result;
+  return `### ${issue.kind} on \`${issue.url}\`
 
-function prBody(result: RunResult): string {
-  const { issue, baseline, final, investigation, iterations, researchNotes } = result;
-
-  const kept = iterations.filter((i) => i.outcome === "kept");
-  const rejected = iterations.filter((i) => i.outcome === "reverted");
-
-  return `## What this fixes
-
-Microsoft Clarity measured **${issue.kind}** on \`${issue.url}\` across real sessions:
+**Area:** ${area} (${breakdown})
 
 | | |
 |---|---|
 | Sessions affected | ${issue.affectedSessions.toLocaleString()} of ${issue.totalSessions.toLocaleString()} (**${(issue.rate * 100).toFixed(1)}%**) |
 | Severity | ${issue.severity.toFixed(0)}/100 |
-| Trend | ${issue.trend ? `${issue.trend.direction} (${issue.trend.delta >= 0 ? "+" : ""}${(issue.trend.delta * 100).toFixed(2)}pp over ${issue.trend.daysBetween}d)` : "no baseline yet"} |
 
-## Root cause
+**Root cause:** ${investigation.hypothesis}
 
-${investigation.hypothesis}
+**Measured effect:** probe score ${baseline.total.toFixed(4)} → ${final.total.toFixed(4)} (${result.improvement > 0 ? "−" : "+"}${Math.abs(result.improvement).toFixed(4)}; 0 = clean, 1 = fully broken).
+${final.primary.detail}
 
-## Measured effect
+Tried ${result.iterations.length} approach(es), kept ${result.acceptedCommits.length}. Every attempt was applied,
+measured, and either committed or hard-reset, the keep-or-revert loop from
+[karpathy/autoresearch](https://github.com/karpathy/autoresearch), with a headless-browser
+probe standing in for \`val_bpb\`.`;
+}
 
-A headless-browser probe reproduced the defect and scored it before and after
-(0 = clean, 1 = fully broken; the score blends the target metric with the other
-five as a regression guard):
+function prBody(result: RunResult, area: Area, breakdown: string): string {
+  return `## Automated fixes, ${area}
 
-**${baseline.total.toFixed(4)} → ${final.total.toFixed(4)}** (${result.improvement > 0 ? "−" : "+"}${Math.abs(result.improvement).toFixed(4)})
-
-- Primary probe (\`${final.primary.kind}\`): ${baseline.primary.score.toFixed(4)} → ${final.primary.score.toFixed(4)}
-- ${final.primary.detail}
-
-## How this was produced
-
-An autonomous hill-climb tried ${iterations.length} approach(es) and kept ${kept.length}.
-Each attempt was applied, measured, and either committed or hard-reset — the same
-keep-or-revert loop as [karpathy/autoresearch](https://github.com/karpathy/autoresearch),
-with the probe score standing in for \`val_bpb\`.
-
-**Kept:**
-${kept.map((i) => `- ${i.direction} (${i.scoreBefore.toFixed(4)} → ${i.scoreAfter?.toFixed(4)})`).join("\n") || "- (none)"}
-
-${rejected.length ? `**Tried and reverted:**\n${rejected.map((i) => `- ${i.direction} (${i.delta !== null && i.delta >= 0 ? "+" : ""}${i.delta?.toFixed(4)})`).join("\n")}` : ""}
-
-${researchNotes ? `<details><summary>External research</summary>\n\n${researchNotes}\n\n</details>` : ""}
+This is a **long-lived branch**. Recursive appends fixes for the \`${area}\` area here as it
+finds them, so this PR accumulates rather than fragmenting into one PR per bug. Each fix is
+a separate commit and is described in a comment below.
 
 ---
 
-⚠️ **The probe score is a proxy, not the goal.** Clarity will be re-sampled
-${config.verifyAfterDays} days after this merges to confirm the real
-\`${issue.metric}\` actually fell. Run \`npm run verify\` to check.
+${fixSummary(result, area, breakdown)}
+
+---
+
+⚠️ **The probe score is a proxy, not the goal.** Real telemetry is re-sampled
+${config.verifyAfterDays} days after merge to confirm the failure actually stopped.
+Run \`npm run cli -- verify\`.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)`;
 }
@@ -128,31 +127,63 @@ export interface ShipOptions {
   onProgress?: (line: string) => void;
 }
 
-/**
- * Move the accepted commits onto their own branch, open a PR, and restore the
- * original branch to exactly where it started.
- */
-export async function ship(result: RunResult, options: ShipOptions = {}): Promise<ShippedFix | undefined> {
+export async function ship(
+  result: RunResult,
+  options: ShipOptions = {},
+): Promise<ShippedFix | undefined> {
   const log = options.onProgress ?? ((l: string) => console.log(l));
 
   if (result.acceptedCommits.length === 0) {
-    log("  nothing to ship — no attempt improved the score.");
+    log(" nothing to ship, no attempt improved the score.");
+    return undefined;
+  }
+  if (!config.targetRepoPath) throw new Error("TARGET_REPO_PATH is not set.");
+
+  const repoPath = config.targetRepoPath;
+  const base = config.prBaseBranch;
+  const originalBranch = git.currentBranch();
+
+  // ---- Which area does this fix belong to? --------------------------------
+  const repo = new Repo(repoPath);
+  const changed = repo.changedBetween(result.startCommit, "HEAD").map((c) => c.path);
+  const breakdown = classifyChange(changed);
+  const area = breakdown.primary;
+
+  log(` changed ${changed.length} file(s) → area '${area}' (${describeBreakdown(breakdown)})`);
+  if (breakdown.crossCutting) {
+    log(`  ⚠ change spans multiple areas, flagging for wider review`);
+  }
+
+  // ---- Get onto the area branch and transplant the commits ---------------
+  let branchInfo;
+  try {
+    branchInfo = checkoutAreaBranch(area, { repoPath, base });
+  } catch (error) {
+    log(`  ! ${error instanceof Error ? error.message : error}`);
+    git.checkout(originalBranch);
     return undefined;
   }
 
-  const originalBranch = git.currentBranch();
-  const stamp = new Date().toISOString().slice(0, 10);
-  const branch = `ux/${result.issue.kind}-${slug(result.issue.url)}-${stamp}`;
+  log(
+    ` branch ${branchInfo.branch}, ${branchInfo.created ? "created" : `reusing (${branchInfo.existingCommits} prior fix commit(s))`}` +
+      (branchInfo.updatedFromBase ? `, updated from ${base}` : ""),
+  );
 
-  // The accepted commits are already on HEAD; branching here captures them.
-  git.createBranch(branch);
-  log(`  branch ${branch} (${result.acceptedCommits.length} commit(s))`);
+  try {
+    cherryPick(repoPath, result.acceptedCommits);
+    log(` applied ${result.acceptedCommits.length} commit(s)`);
+  } catch (error) {
+    log(`  ! ${error instanceof Error ? error.message : error}`);
+    git.checkout(originalBranch);
+    return undefined;
+  }
 
   const fix: ShippedFix = {
     issueId: result.issue.id,
     url: result.issue.url,
     kind: result.issue.kind,
-    branch,
+    area,
+    branch: branchInfo.branch,
     shippedAt: new Date().toISOString(),
     clarityRateBefore: result.issue.rate,
     affectedSessionsBefore: result.issue.affectedSessions,
@@ -161,24 +192,47 @@ export async function ship(result: RunResult, options: ShipOptions = {}): Promis
     commits: result.acceptedCommits,
   };
 
+  // ---- Push and open-or-update the area PR --------------------------------
   if (!options.dryRun) {
-    try {
-      git.push(branch);
-      const title = `fix(ux): ${result.issue.kind} on ${result.issue.url}`;
-      fix.prUrl = git.openPullRequest(title, prBody(result), config.prBaseBranch);
-      log(`  PR: ${fix.prUrl}`);
-    } catch (error) {
-      log(`  ! could not open PR: ${error instanceof Error ? error.message : String(error)}`);
-      log(`    The branch ${branch} still holds the commits — open the PR manually.`);
+    if (!hasRemote(repoPath)) {
+      log(` no 'origin' remote, commits are on ${branchInfo.branch} locally.`);
+    } else {
+      try {
+        push(repoPath, branchInfo.branch);
+        const pr = upsertPullRequest(
+          repoPath,
+          branchInfo.branch,
+          base,
+          `Recursive: automated fixes, ${area}`,
+          prBody(result, area, describeBreakdown(breakdown)),
+        );
+        fix.prUrl = pr.url;
+        fix.prNumber = pr.number;
+
+        if (pr.created) {
+          log(` opened PR #${pr.number}: ${pr.url}`);
+        } else {
+          // Existing PR already updated by the push; announce what was added.
+          log(` updated existing PR #${pr.number}: ${pr.url}`);
+          commentOnPullRequest(
+            repoPath,
+            pr.number,
+            `### New fix appended\n\n${fixSummary(result, area, describeBreakdown(breakdown))}`,
+          );
+        }
+      } catch (error) {
+        log(`  ! could not push or open PR: ${error instanceof Error ? error.message : error}`);
+        log(` commits are on ${branchInfo.branch}, push manually.`);
+      }
     }
   } else {
-    log(`  dry run — not pushing. Inspect with: git -C ${config.targetRepoPath} log ${branch}`);
+    log(` dry run, not pushing. Inspect: git -C ${repoPath} log ${branchInfo.branch}`);
   }
 
-  // Leave the user's working branch exactly as we found it.
+  // ---- Leave the developer's branch exactly as we found it ---------------
   git.checkout(originalBranch);
   git.revertTo(result.startCommit);
-  log(`  restored ${originalBranch} to ${result.startCommit.slice(0, 8)}`);
+  log(` restored ${originalBranch} to ${result.startCommit.slice(0, 8)}`);
 
   recordShipped(fix);
   return fix;

@@ -6,7 +6,7 @@ import { z } from "zod";
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
- * Minimal .env loader. Deliberately dependency-free — this runs before anything
+ * Minimal .env loader. Deliberately dependency-free, this runs before anything
  * else and a broken dotenv shouldn't be able to take the CLI down.
  * Real environment variables always win over the file.
  */
@@ -41,6 +41,24 @@ const Schema = z.object({
   prBaseBranch: z.string().default("main"),
   maxIterations: z.number().int().positive().default(12),
   verifyAfterDays: z.number().int().positive().default(3),
+
+  /**
+   * Which engine edits customer code. See src/agents/fixers/, this is the one
+   * knob a zero-egress customer needs to change.
+   */
+  fixEngine: z.enum(["claude-agent-sdk", "openhands"]).default("claude-agent-sdk"),
+  openHandsModel: z.string().default("anthropic/claude-opus-4-8"),
+  /** OpenAI-compatible endpoint. Set to keep the fix stage fully on-premises. */
+  openHandsBaseUrl: z.string().optional(),
+
+  /**
+   * Provider for the reasoning stages (query expansion, reranking, investigation).
+   * `openai` covers OpenAI itself and any OpenAI-compatible endpoint. Ollama,
+   * vLLM, LM Studio, which is how an on-prem customer keeps everything internal.
+   */
+  llmProvider: z.enum(["anthropic", "openai"]).default("anthropic"),
+  openAiBaseUrl: z.string().default("https://api.openai.com/v1"),
+  openAiModel: z.string().default("gpt-4o-mini"),
 });
 
 export type Config = z.infer<typeof Schema> & {
@@ -66,6 +84,12 @@ const parsed = Schema.parse({
   prBaseBranch: process.env.PR_BASE_BRANCH || "main",
   maxIterations: num(process.env.MAX_ITERATIONS, 12),
   verifyAfterDays: num(process.env.VERIFY_AFTER_DAYS, 3),
+  fixEngine: (process.env.FIX_ENGINE as "claude-agent-sdk" | "openhands") || "claude-agent-sdk",
+  openHandsModel: process.env.OPENHANDS_MODEL || "anthropic/claude-opus-4-8",
+  openHandsBaseUrl: process.env.OPENHANDS_BASE_URL || undefined,
+  llmProvider: (process.env.LLM_PROVIDER as "anthropic" | "openai") || "anthropic",
+  openAiBaseUrl: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
+  openAiModel: process.env.OPENAI_MODEL || "gpt-4o-mini",
 });
 
 export const config: Config = {
@@ -78,6 +102,6 @@ export const config: Config = {
 
 if (process.env.CLARITY_MODE === "live" && !config.clarityToken) {
   console.warn(
-    "[config] CLARITY_MODE=live but CLARITY_API_TOKEN is empty — falling back to mock fixtures.",
+    "[config] CLARITY_MODE=live but CLARITY_API_TOKEN is empty, falling back to mock fixtures.",
   );
 }

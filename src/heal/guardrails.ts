@@ -17,7 +17,7 @@ export type ActionKind = "flag-off" | "rollback";
 
 /**
  * Actions are permitted only if they are reversible by a single inverse
- * operation (ARCHITECTURE.md §4). This map IS that constraint — adding an entry
+ * operation (ARCHITECTURE.md §4). This map IS that constraint, adding an entry
  * here is the deliberate act of asserting reversibility.
  */
 export const INVERSE: Record<ActionKind, string> = {
@@ -57,7 +57,7 @@ export function evaluate(project: Project, action: ProposedAction): Verdict {
     passed.push("autonomy enabled");
   }
 
-  // 2. Action allowlist — an explicit list of verbs, not a denylist.
+  // 2. Action allowlist, an explicit list of verbs, not a denylist.
   if (!g.allowedActions.includes(action.kind)) {
     blockedBy.push(
       `Action '${action.kind}' is not in this project's allowlist (${g.allowedActions.join(", ") || "none"}).`,
@@ -74,12 +74,14 @@ export function evaluate(project: Project, action: ProposedAction): Verdict {
   }
 
   // 4. Confidence floor.
-  //    high    → act.
-  //    medium  → act only if containment is narrow (a single flag), because a
-  //              flag flip affects one feature while a rollback affects everything.
-  //    low     → never. Nothing recent to revert means any action is a guess.
+  // high    → act.
+  // medium  → act only if containment is narrow (a single flag), because a
+  // flag flip affects one feature while a rollback affects everything.
+  // low     → never. Nothing recent to revert means any action is a guess.
   if (action.incident.confidence === "low") {
-    blockedBy.push("Incident confidence is low — cause is not attributable, so containment would be a guess.");
+    blockedBy.push(
+      "Incident confidence is low, cause is not attributable, so containment would be a guess.",
+    );
   } else if (action.incident.confidence === "medium" && action.kind !== "flag-off") {
     blockedBy.push("Medium confidence permits only flag-scoped containment, not a rollback.");
   } else {
@@ -92,14 +94,19 @@ export function evaluate(project: Project, action: ProposedAction): Verdict {
       `Blast radius ${action.blastRadiusPct.toFixed(0)}% exceeds the cap of ${g.maxBlastRadiusPct}%.`,
     );
   } else {
-    passed.push(`blast radius ${action.blastRadiusPct.toFixed(0)}% within ${g.maxBlastRadiusPct}% cap`);
+    passed.push(
+      `blast radius ${action.blastRadiusPct.toFixed(0)}% within ${g.maxBlastRadiusPct}% cap`,
+    );
   }
 
   const auditLog = readAudit(project.id);
 
   // 6. Rate limit. Bounds the damage from a detector that starts crying wolf.
   const recentActions = auditLog.filter(
-    (r) => r.actor === "autonomous" && r.outcome === "executed" && Date.now() - Date.parse(r.at) < HOUR_MS,
+    (r) =>
+      r.actor === "autonomous" &&
+      r.outcome === "executed" &&
+      Date.now() - Date.parse(r.at) < HOUR_MS,
   );
   if (recentActions.length >= g.maxActionsPerHour) {
     blockedBy.push(
@@ -109,7 +116,7 @@ export function evaluate(project: Project, action: ProposedAction): Verdict {
     passed.push(`rate limit ${recentActions.length}/${g.maxActionsPerHour}`);
   }
 
-  // 7. Per-incident cooldown. Prevents flapping — heal, re-break, heal.
+  // 7. Per-incident cooldown. Prevents flapping, heal, re-break, heal.
   const lastForIncident = auditLog
     .filter((r) => r.incidentId === action.incident.id && r.outcome === "executed")
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
@@ -127,7 +134,7 @@ export function evaluate(project: Project, action: ProposedAction): Verdict {
     passed.push("no prior action on this incident");
   }
 
-  // 8. Target sanity — never act on an empty or wildcard target.
+  // 8. Target sanity, never act on an empty or wildcard target.
   if (!action.target || action.target === "*") {
     blockedBy.push("Action target is empty or a wildcard.");
   } else {

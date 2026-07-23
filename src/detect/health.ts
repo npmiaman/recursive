@@ -7,7 +7,7 @@ import { fingerprint, type Signal } from "./types.ts";
 /**
  * Synthetic journey checks.
  *
- * The only detector that works with **no live traffic** — at 3am, on a
+ * The only detector that works with **no live traffic**, at 3am, on a
  * low-volume tenant, or in the minutes after a deploy before any real user has
  * hit the new code. It's the difference between finding out you broke checkout
  * from your monitoring versus from a customer email on Monday.
@@ -47,13 +47,13 @@ export interface JourneyResult {
   failedStep?: string;
   reason?: string;
   durationMs: number;
-  /** Console errors seen during the run — often the actual cause. */
+  /** Console errors seen during the run, often the actual cause. */
   consoleErrors: string[];
 }
 
 /**
  * The default journey for any web project: can a user load the homepage and see
- * something? Deliberately minimal — real journeys are project-specific and are
+ * something? Deliberately minimal, real journeys are project-specific and are
  * defined by the customer.
  */
 export const DEFAULT_JOURNEYS: Journey[] = [

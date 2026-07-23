@@ -28,7 +28,7 @@ export function normalizeUrl(raw: string): string {
   try {
     if (/^https?:\/\//i.test(path)) path = new URL(path).pathname;
   } catch {
-    /* fall through — treat as a path */
+    /* fall through, treat as a path */
   }
   const q = path.indexOf("?");
   if (q !== -1) path = path.slice(0, q);
@@ -40,12 +40,7 @@ export function normalizeUrl(raw: string): string {
 
 /** How many sessions a row represents, across the field names Clarity uses. */
 function rowSessions(row: Record<string, unknown>): number {
-  for (const key of [
-    "sessionsCount",
-    "totalSessionCount",
-    "subTotal",
-    "sessionsWithMetric",
-  ]) {
+  for (const key of ["sessionsCount", "totalSessionCount", "subTotal", "sessionsWithMetric"]) {
     const value = row[key];
     if (value !== undefined) {
       const n = toNumber(value);
@@ -100,17 +95,14 @@ export interface ExtractOptions {
  * Extract every friction issue present in a snapshot, unranked.
  * Severity is assigned separately in rank.ts.
  */
-export function extractIssues(
-  snapshot: Snapshot,
-  options: ExtractOptions = {},
-): Issue[] {
+export function extractIssues(snapshot: Snapshot, options: ExtractOptions = {}): Issue[] {
   const minSessions = options.minSessions ?? 200;
   const minRate = options.minRate ?? 0.01;
 
   const traffic = trafficByUrl(snapshot);
   if (traffic.size === 0) {
     console.warn(
-      "[signals] no URL-dimensioned traffic in snapshot — re-pull with dimension1=URL, " +
+      "[signals] no URL-dimensioned traffic in snapshot, re-pull with dimension1=URL, " +
         "otherwise friction cannot be attributed to a page.",
     );
     return [];

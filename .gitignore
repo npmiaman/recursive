@@ -1,4 +1,30 @@
+# Dependencies
 node_modules/
+
+# Build output
+.next/
+out/
+dist/
+*.tsbuildinfo
+
+# Local state. NEVER commit these: the web database holds account rows,
+# password hashes and live session tokens, and the memory stores hold whatever
+# the indexer read out of a customer's codebase.
 data/
+.data/
+*.db
+*.db-journal
+*.sqlite
+
+# Secrets. Keys belong here and only here.
 .env
+.env.local
+.env.*.local
+
+# Logs and OS noise
 *.log
+.DS_Store
+
+# Playwright
+test-results/
+playwright-report/

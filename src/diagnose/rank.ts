@@ -1,11 +1,12 @@
 import type { Snapshot } from "../clarity/types.ts";
 import { extractIssues, type ExtractOptions } from "./signals.ts";
 import type { Issue, IssueKind, Trend } from "./issues.ts";
+import { criticalRoutes } from "../memory/base.ts";
 
 /**
  * How damaging each symptom is, independent of volume.
  *
- * A script error is a hard failure — something is broken for everyone who hits
+ * A script error is a hard failure, something is broken for everyone who hits
  * it. Excessive scrolling is a design smell: real, worth fixing, but nobody is
  * blocked. Rage clicking sits between: the user is trying and failing, which is
  * both a failure and a signal of intent, so it outranks a passive dead click.
@@ -20,11 +21,15 @@ const KIND_WEIGHT: Record<IssueKind, number> = {
 };
 
 /**
- * Pages where friction costs money. Matched as path prefixes.
- * Tune this per business — it is the main lever for aligning the agent's
- * priorities with yours, and it is deliberately data, not logic.
+ * FALLBACK list of money-path prefixes.
+ *
+ * Used only when base memory has no opinion. It bakes in two bad assumptions,
+ * that routes are named in English, and that the product is e-commerce, so a
+ * bank calling its payment flow `/txn/initiate` gets no priority boost at all.
+ * Once `memory index` has run, criticality comes from what the CODE does
+ * (see criticalRoutes in memory/base.ts) and this list is not consulted.
  */
-const CONVERSION_PATHS = [
+const FALLBACK_CONVERSION_PATHS = [
   "/checkout",
   "/cart",
   "/pricing",
@@ -36,13 +41,29 @@ const CONVERSION_PATHS = [
   "/contact",
 ];
 
-function conversionMultiplier(url: string): number {
-  return CONVERSION_PATHS.some((p) => url.startsWith(p)) ? 1.5 : 1.0;
+function conversionMultiplier(url: string, projectId?: string): number {
+  // Prefer the model's judgement, made from reading the actual code.
+  if (projectId) {
+    try {
+      const critical = criticalRoutes(projectId);
+      if (critical.size > 0) {
+        for (const route of critical) {
+          if (url === route || url.startsWith(route)) return 1.5;
+        }
+        // Base memory HAS an opinion and this route is not on it, trust that
+        // rather than falling back to guessing from the URL spelling.
+        return 1.0;
+      }
+    } catch {
+      /* not indexed yet, fall through */
+    }
+  }
+  return FALLBACK_CONVERSION_PATHS.some((p) => url.startsWith(p)) ? 1.5 : 1.0;
 }
 
 /**
  * Reach, log-scaled. A page with 10,000 affected sessions matters more than one
- * with 100 — but not 100x more, or the homepage would win every argument
+ * with 100, but not 100x more, or the homepage would win every argument
  * forever and nothing else would ever get fixed.
  */
 function reachScore(affectedSessions: number): number {
@@ -59,7 +80,7 @@ function reachScore(affectedSessions: number): number {
  * over-promotes a 90%-broken page nobody visits; reach alone over-promotes a
  * mild annoyance on the highest-traffic page.
  */
-export function severityOf(issue: Issue): number {
+export function severityOf(issue: Issue, projectId?: string): number {
   const base = 0.6 * reachScore(issue.affectedSessions) + 0.4 * Math.min(1, issue.rate);
   const trendAmp =
     issue.trend?.direction === "worsening"
@@ -69,14 +90,14 @@ export function severityOf(issue: Issue): number {
         : 1;
 
   const score =
-    100 * KIND_WEIGHT[issue.kind] * conversionMultiplier(issue.url) * base * trendAmp;
+    100 * KIND_WEIGHT[issue.kind] * conversionMultiplier(issue.url, projectId) * base * trendAmp;
 
   return Math.max(0, Math.min(100, score));
 }
 
 /**
  * Compare two snapshots to detect whether each issue is getting better or worse.
- * This is the payoff for keeping local history — the API's 3-day window can
+ * This is the payoff for keeping local history, the API's 3-day window can
  * never show it.
  */
 export function attachTrends(
@@ -110,14 +131,14 @@ export function attachTrends(
   });
 }
 
-/** Extract, trend, score and sort — the full diagnosis pass over a snapshot. */
+/** Extract, trend, score and sort, the full diagnosis pass over a snapshot. */
 export function diagnose(
   snapshot: Snapshot,
   baseline?: Snapshot,
-  options: ExtractOptions = {},
+  options: ExtractOptions & { projectId?: string } = {},
 ): Issue[] {
   const withTrends = attachTrends(extractIssues(snapshot, options), baseline, options);
   return withTrends
-    .map((issue) => ({ ...issue, severity: severityOf(issue) }))
+    .map((issue) => ({ ...issue, severity: severityOf(issue, options.projectId) }))
     .sort((a, b) => b.severity - a.severity);
 }

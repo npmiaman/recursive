@@ -1,211 +1,708 @@
-# clarity-autoresearch
+# Recursive
 
-Reads **Microsoft Clarity** to find where real users are hitting friction, then runs
-a **[karpathy/autoresearch](https://github.com/karpathy/autoresearch)-style hill-climb**
-to fix it — proposing a change, measuring, keeping it if it helped, hard-resetting if
-it didn't — and opens a PR. Days later it re-samples Clarity to check whether the real
-metric actually moved.
+**Software that finds its own breakage, contains it, and opens a verified fix.**
 
-```
-Clarity  ──▶  diagnose  ──▶  probe  ──▶  hill-climb  ──▶  PR  ──▶  Clarity again
-(what's       (rank by      (a number   (keep or           (ship)   (was it
- broken)       impact)       in secs)    revert)                     actually?)
-```
+Recursive installs into a repository, learns what the codebase does, watches
+production for failures (including the silent ones that throw no exception), and
+repairs them by writing code and re-testing the real user journey until it
+genuinely passes.
 
----
+It is not a linter and not a monitoring dashboard. It is a closed loop: detect,
+diagnose, change the code, verify against reality, and try again if the change
+did not work.
 
-## The one design decision that matters
-
-AutoResearch works because the scorer is **fast, deterministic, and cheap**: edit
-`train.py`, run 5 minutes, read `val_bpb`, keep or revert, ~12 experiments an hour.
-
-Clarity is the opposite of that. Its numbers update daily at best, require real
-traffic through a *deployed* change, are confounded by traffic mix, and the API is
-capped at **10 requests per project per day** with a 1–3 day lookback. You cannot
-hill-climb against it. One noisy sample per day is not an optimization signal.
-
-So the loop is split in two, at different clock speeds:
-
-| | Inner loop | Outer loop |
-|---|---|---|
-| **Runs** | seconds, hundreds of times | days, once per shipped fix |
-| **Metric** | headless-browser probe score | real Clarity friction rate |
-| **Role** | optimization | verification + calibration |
-| **Analog** | `val_bpb` | the thing you actually care about |
-
-Clarity picks the fight. The probe drives the optimization. Clarity confirms the win.
-
-The third column is the part that keeps this honest: every verification records
-whether the probe *predicted* the real outcome, per issue kind. A probe that keeps
-saying "fixed" while Clarity disagrees loses trust and gets flagged — visible in
-`npm run cli -- status`.
-
----
-
-## What the probe actually measures
-
-Each Clarity friction metric gets a mechanical reproduction in a headless browser.
-The instrumentation wraps `addEventListener` at document-start, so it can answer the
-question `DeadClickCount` implies but can't tell you: *does this element that looks
-clickable actually do anything?*
-
-| Clarity metric | Probe |
-|---|---|
-| `DeadClickCount` | Fraction of interactive-*looking* elements (`cursor:pointer`, button-ish class, `onclick`) with no native semantics and no registered listener |
-| `RageClickCount` | Click each control; did **anything** observable happen in 350ms — DOM mutation, network request, navigation? |
-| `ScriptErrorCount` | Distinct uncaught errors and unhandled rejections during load and interaction |
-| `ErrorClickCount` | Clicks that produce a *new* uncaught error |
-| `ExcessiveScroll` | How many viewports down the primary CTA sits, plus page length |
-| `QuickbackClick` | FCP, plus whether there's meaningful above-fold content at all |
-
-The composite is:
-
-```
-total = 0.7 × primary + 0.3 × (0.4 × mean(guards) + 0.6 × max(guards))
-```
-
-That regression term is load-bearing. Without it the agent can "fix" dead clicks by
-deleting the element, or fix excessive scroll by deleting content.
-
-It's weighted toward the **worst** guard rather than the average for a reason found
-by testing this on the bundled demo page: converting the dead `<div>`s into real
-`<button>`s sent `dead-click` 0.80 → 0.00 but `rage-click` 0.00 → 0.80, because the
-new buttons still had no handler. Averaged across five guards, that regression moved
-the composite by ~0.05 — near-invisible. Trading one defect for another should not
-read as a clean win, so the max term makes it cost something.
-
-You can reproduce that yourself:
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the deeper design and trust model.
 
 ```bash
-node fixtures/serve.mjs &
-TARGET_BASE_URL=http://localhost:4173 npm run cli -- score 2
-# score 0.6759 — primary dead-click 0.8000
+npm install && npx playwright install chromium
+npm run cli -- demo        # seeds a real scenario and runs detect then contain
 ```
 
 ---
 
-## Setup
+## Table of contents
+
+1. [The problem](#the-problem)
+2. [How it works end to end](#how-it-works-end-to-end)
+3. [Quick start](#quick-start)
+4. [The three tiers](#the-three-tiers)
+5. [Components in detail](#components-in-detail)
+6. [Measured results](#measured-results)
+7. [CLI reference](#cli-reference)
+8. [Web dashboard](#web-dashboard)
+9. [Configuration](#configuration)
+10. [Security and privacy](#security-and-privacy)
+11. [Testing](#testing)
+12. [Limitations and what is not done](#limitations-and-what-is-not-done)
+13. [Repository layout](#repository-layout)
+
+---
+
+## The problem
+
+Error tracking answers *"what threw?"*. That misses the failure mode that costs
+the most money.
+
+| Failure mode | Throws? | Ticket filed? | Caught by | Time to detect |
+|---|---|---|---|---|
+| Server 500s | yes | yes | APM | minutes |
+| Uncaught JS exception | yes | rarely | error tracking | hours |
+| **Button silently stops firing** | **no** | **no** | **nothing** | **weeks, or never** |
+| **Form submits into the void** | **no** | **no** | **nothing** | **weeks, or never** |
+
+A click handler throws before it reaches the network call. A form submits and
+the screen says "Order confirmed" while the server never heard about it. A
+checkout flow works on desktop and is broken only on mobile Safari. Nothing
+crashes, nobody complains, users just leave, and the revenue graph looks like
+seasonality.
+
+Recursive is built around that class of failure specifically, then extended to
+ordinary loud failures too, because once you have the machinery for the hard
+case the easy case is nearly free.
+
+Three things make the silent case tractable:
+
+1. **Behavioural telemetry.** Dead clicks, rage clicks and quick-backs are
+   evidence that a user tried something and it did not work, even when the
+   application believes everything is fine.
+2. **Ground truth outside the UI.** The screen saying "Order confirmed" is not
+   evidence an order exists. Checking that the order count actually moved is.
+3. **Git as the change oracle.** You do not need the customer to call
+   `recordRelease()` from their CI. The repository already knows what shipped,
+   when, which files changed, and which parts of the codebase are churning.
+
+---
+
+## How it works end to end
+
+```
+  ┌─────────────┐
+  │   INDEX     │  Read every file once. Learn what each one is FOR,
+  │ base memory │  what depends on it, and what breaks if it is wrong.
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │   DETECT    │  Clarity signals, browsing-agent sweeps,
+  │             │  SDK-reported errors, backend traces.
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │  CORRELATE  │  Which deploy caused this? Which cohort is hit?
+  │             │  Is this novel, or has it happened before?
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │  TIER 0     │  Contain it now, without a deploy. Turn the flag off.
+  │  CONTAIN    │  Guardrails decide whether this is allowed at all.
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │  RETRIEVE   │  Find the code that matters. Six signals fused:
+  │             │  stack, symbols, git, base memory, BM25, import graph.
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │  TIER 1     │  Write a fix. Re-run the REAL user journey in a real
+  │  REPAIR     │  browser. Check the server. If it still fails, debug
+  │ closed loop │  and try again. Stop when verified or honestly stuck.
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │  PULL       │  A human reviews and merges. Recursive never deploys.
+  │  REQUEST    │
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │  REMEMBER   │  Every failure, every attempt including the failures,
+  │  forever    │  and all the reasoning. Never deleted.
+  └─────────────┘
+```
+
+The loop that matters most is Tier 1. A fix is not "done" because an agent said
+so. It is done when the user journey has been driven again in a real browser,
+the business postconditions hold, and the server shows no errors. All three must
+agree.
+
+---
+
+## Quick start
+
+Requirements: **Node.js 22.6 or newer** (the project runs TypeScript directly via
+`--experimental-strip-types`, so there is no build step), **git**, and
+**Chromium** via Playwright.
 
 ```bash
+git clone https://github.com/npmiaman/recursive.git
+cd recursive
 npm install
 npx playwright install chromium
+```
+
+Configure the environment:
+
+```bash
 cp .env.example .env
+# Open .env and set your keys. Never put a key anywhere else.
 ```
 
-**You do not need a Clarity token to try this.** With `CLARITY_API_TOKEN` empty, the
-whole pipeline runs against generated fixtures shaped exactly like the real API
-response:
+Point it at a repository and let it learn the codebase:
 
 ```bash
-npm run snapshot     # stores a fixture snapshot
-npm run diagnose     # ranks the friction issues in it
+npm run cli -- memory index --repo /path/to/your/app
 ```
 
-For live data: Clarity project → **Settings → Data Export → Generate new API token**.
-Note that only project admins can do this.
-
-To run the fix loop you also need `TARGET_BASE_URL` (a running instance of the site)
-and `TARGET_REPO_PATH` (a clean git checkout of it).
-
----
-
-## Usage
+Describe the user journeys that matter:
 
 ```bash
-npm run cli -- status          # budget, snapshots, shipped fixes, probe calibration
-npm run cli -- snapshot        # pull Clarity into the local time series
-npm run cli -- diagnose        # ranked list of friction issues
-npm run cli -- score 0         # measure issue #0 with the probe, no changes
-npm run cli -- fix 0 --dry-run # full hill-climb, commit to a branch, don't push
-npm run cli -- fix --top-issue # highest-severity issue, real PR
-npm run cli -- verify          # re-sample Clarity, settle up on shipped fixes
+npm run cli -- sweep init --repo /path/to/your/app
+# then edit recursive.flows.json
 ```
 
-A typical `fix` run:
+Then run it:
 
-```
-▶ [78] dead-click on /pricing — 1,240/9,100 sessions (13.6%)
-  measuring baseline…
-  score 0.4820  (lower is better)
-    primary  dead-click        0.6100  8/13 interactive-looking elements have no click affordance.
-  investigating root cause…
-  hypothesis: The pricing tier cards are <div>s with cursor:pointer and a hover
-              state, but selection is handled by an inner radio input that only
-              covers ~40px of the card.
-
-  [1/12] Make the whole tier card a real label-wrapped control  (risk: low)
-      edited:  2 files changed, 14 insertions(+), 9 deletions(-)
-      re-measuring…
-      ✓ KEPT   0.4820 → 0.1140  (-0.3680)
-
-  [2/12] Add pressed-state feedback to the tier cards  (risk: low)
-      re-measuring…
-      ✗ revert 0.1140 → 0.1180  (+0.0040)
-
-  done: 0.4820 → 0.1140 (-0.3680), 1 change(s) kept of 2 tried.
+```bash
+npm run cli -- sweep daily                 # test everything important
+npm run cli -- sweep pr --base main        # test only what a diff put at risk
+npm run cli -- sweep daily --repair        # and fix what breaks
 ```
 
-Every iteration — including the rejected ones and why — lands in
-`data/runs/<issue>.jsonl`.
+To see the whole system on a seeded scenario without touching a real app:
+
+```bash
+npm run cli -- demo
+```
 
 ---
 
-## Steering it: `program.md`
+## The three tiers
 
-Like autoresearch, **you program the markdown, not the loop.** `program.md` holds
-your product context, hard constraints ("never touch pricing numbers"), a map of
-where things live, known false positives, and directions worth exploring. It's read
-into the investigation and fix prompts on every run.
+Recursive deliberately stops at Tier 1. Tier 2 is absent on purpose, not because
+it was hard.
 
-The "known false positives" section is the highest-leverage part — it's how you stop
-the loop burning iterations on non-problems.
+| Tier | What it does | Speed | Reversibility | Implemented |
+|---|---|---|---|---|
+| **Tier 0: contain** | Turn off a flag, serve a directive to the SDK. No deploy, no code change. | Seconds | One inverse operation | Yes |
+| **Tier 1: repair** | Write code, verify against the real journey, open a pull request. | Minutes | Normal code review | Yes |
+| **Tier 2: auto-deploy** | Ship to production without a human. | n/a | n/a | **No, by design** |
 
----
+Containment and repair are different jobs on different clocks. When checkout is
+broken, the useful thing to do in the first thirty seconds is stop the bleeding,
+not open a pull request. Turning a flag off is reversible by a single inverse
+operation, which makes it safe to automate in a way that shipping code never is.
 
-## Safety
+Every Tier 0 action passes through **guardrails** that are deterministic and
+auditable by construction:
 
-- **The repo must be clean before a run.** The loop reverts by `git reset --hard`
-  plus `git clean -fd`; uncommitted work would be destroyed, so it refuses to start.
-- **Every attempt is checkpointed.** Failed or errored attempts hard-reset to the
-  recorded HEAD before the next iteration begins.
-- **Your branch is restored.** Accepted commits are moved onto a `ux/*` branch and
-  your working branch is reset to exactly where it started.
-- **The API budget is a ledger on disk**, not an in-memory counter — two CLI runs
-  can't each think they have a fresh 10. Two calls are reserved so the outer loop
-  can always verify.
-- **PRs are drafted, not merged.** A human reviews every change.
+- Blast radius is bounded *before* it is calculated, by rules the agent cannot
+  alter.
+- Rate limits per hour, and a cooldown per target rather than per incident.
+- An allowlist of permitted action types per project.
+- Low-confidence incidents are refused. If the cause is not attributable,
+  containment would be a guess.
 
----
-
-## Known limits
-
-- **The probe can't reproduce everything.** Auth-gated pages, device-specific bugs,
-  and locale-specific issues will show a clean baseline despite a real Clarity
-  signal. The loop detects this and skips rather than inventing a fix.
-- **`ExcessiveScroll` and `QuickbackClick` are the weakest probes** — they're
-  proxies for intent, not mechanical failures. Watch their calibration trust score
-  before letting them drive PRs.
-- **Clarity's API can't attribute friction to a DOM element**, only to a URL. The
-  element-level attribution here comes from the probe, not from Clarity — which
-  means it's an inference, and occasionally the wrong one.
-- **Verification is correlational.** A confirmed drop days after a deploy is
-  evidence, not proof; other things shipped too. Treat `confirmed` as "consistent
-  with", and use a proper A/B test when the stakes justify it.
+Every decision, allowed or blocked, is written to an append-only audit log.
 
 ---
 
-## Layout
+## Components in detail
+
+### Base memory: what Recursive knows about your codebase
+
+The first time Recursive runs it reads every file and records two tiers of
+knowledge.
+
+**Tier 1 is structural** and free: exports, imports, symbols, language, size,
+and how many other files depend on this one (the blast radius if it breaks).
+
+**Tier 2 is semantic** and uses a model: what this file is FOR in domain terms,
+what concepts it deals with, what breaks if it is wrong, which routes it serves,
+whether it is business critical, and which user journeys it participates in.
+
+Tier 2 is the part that matters, and it exists to solve a specific measurable
+problem. A bug report says "the buy button does nothing". The file is called
+`CheckoutButton.tsx` and contains `submitOrder` and `useOrderMutation`.
+Structural data shares no vocabulary with that report and cannot bridge it. Only
+a summary written in domain language can.
+
+Base memory also replaces several hardcoded heuristics elsewhere in the system.
+Route criticality used to be guessed from URL spelling against an English word
+list, which fails immediately for a bank whose payment flow is `/txn/initiate`.
+Now it comes from what the code actually does.
+
+Base memory is **append-only**. A changed file gets a new record and the old one
+stays, so "what did this file used to do?" remains answerable.
+
+### Retrieval: finding the code that matters
+
+No single signal is reliable alone. Stack traces are precise but silent failures
+do not produce them. Git tells you what changed but not which change is to
+blame. Keyword search misses fixes that live one import away from anything the
+failure mentions.
+
+So six independent retrievers run and their rankings are fused with **Reciprocal
+Rank Fusion**. RRF combines *ranks* rather than scores, which matters because
+BM25 scores, git churn counts and graph hop-distances live on wildly different
+scales and cannot be meaningfully added. It needs no training data and degrades
+gracefully: a failure with no stack trace simply loses one voter.
+
+| Signal | Weight | What it is |
+|---|---|---|
+| Stack frames | 3.0 | Close to fact rather than inference |
+| Symbols | 2.5 | An identifier resolving to a definition is an address, not a guess |
+| Git changed | 2.0 | What shipped just before this broke |
+| Lexical (BM25) | 1.0 | Keyword overlap, code-tuned |
+| Semantic | 1.0 | Optional embedding retriever |
+| Base memory | 0.3 | What the file is FOR. Deliberately weak, see below |
+| Import graph | 0.25 | Adjacency is a hint, not a finding |
+
+Details arrived at by measurement rather than taste:
+
+- **BM25 length normalization is `b = 0.4`, not the textbook `0.75`.** Code
+  files are long, and the textbook value punished them so heavily that the file
+  mentioning the query terms 34 times ranked 13th.
+- **Hub files are excluded from graph expansion.** `config.ts` and `types.ts`
+  sit one hop from everything and won every query.
+- **RRF is blended with score magnitude.** Pure RRF flattened a decisive 1.8x
+  BM25 win into a near-tie that any weak second signal could reorder.
+- **Base memory is weighted below lexical.** The first attempt weighted it at
+  1.4, above keyword search, reasoning that semantic understanding beats keyword
+  overlap. That was wrong and cost recall@3 (92 percent down to 75 percent) by
+  displacing correct hits with plausible ones. This signal is inference about
+  purpose, not evidence of a match, so it must not outvote a real hit. Its job
+  is to break ties and to rescue queries where lexical finds nothing at all.
+- **The tokenizer stems.** A report saying "chunking splits functions" shares
+  zero tokens with `chunk.ts` and `chunkFile`. Five conservative suffix rules
+  emit the stem alongside the original, so exact identifier matches keep full
+  weight while morphological variants become reachable. Deliberately not Porter,
+  which mangles code vocabulary ("routes" to "rout", "caching" to "cach").
+
+### The closed repair loop
+
+This is what makes "self-healing" a checkable claim rather than a marketing word.
 
 ```
-program.md              # ← you edit this
+verify the flow in a real browser  ->  it fails
+ask the debugger what to do        ->  a hypothesis and an approach
+apply a change to real files       ->  git is ground truth, not the agent's claim
+verify AGAIN in a real browser     ->  did the USER JOURNEY pass?
+check business postconditions      ->  did the order count actually move?
+check the server                   ->  any 5xx or unhandled exception?
+
+   all three agree  ->  done
+   otherwise        ->  debug, revise the hypothesis, try again
+```
+
+Three properties are load-bearing.
+
+**Traces are never replayed during verification.** A recorded trace describes
+the app as it was BEFORE the fix. Replaying it would either follow a path that
+no longer exists or, worse, pass by luck without exercising the change at all.
+
+**The debugger must explain why the last theory was wrong before proposing a new
+one.** The most common failure mode in automated repair is re-trying variations
+of an idea that was already disproven. The schema forces
+`whyPreviousAttemptFailed` and a `hypothesisChanged` boolean.
+
+**The loop can admit defeat.** If the diagnosis stops changing across two cycles
+while the flow stays broken, it stops and hands off to a human with the full
+evidence trail and a list of what it would need to see to be confident. A loop
+that cannot give up is a loop that burns budget forever.
+
+Fixes land on **long-lived per-area git branches** (`recursive/frontend`,
+`recursive/backend` and so on) rather than one throwaway branch per incident,
+because that is how actual teams work, and because a branch per incident
+produces pull requests nobody reviews.
+
+The coding agent is explicitly instructed to **repair the behaviour, not remove
+the feature**. Deleting a broken checkout button would make the test pass and is
+never the fix.
+
+### Verification: never trust the UI
+
+A flow that only checks "the screen looked right" is checking the wrong thing.
+Three independent judges must agree:
+
+1. **The user journey completed.** A browsing agent drove it in a real browser.
+2. **Business postconditions hold.** Assertions made from outside the UI: an
+   HTTP check, an absence check, or a count-delta such as "the order count must
+   go up by exactly one".
+3. **The server behaved.** No 5xx, no unhandled exception, and the calls the
+   flow normally makes actually happened.
+
+When the UI reports success and ground truth disagrees, that is flagged as
+`uiLied`, and it is the highest-value finding a sweep can produce: a bug no
+amount of manual clicking would catch, because it looks correct.
+
+### The internal browsing agent
+
+Recursive ships its own browsing agent rather than depending on an external one,
+because bringing it in-house allowed three optimisations that matter at the
+scale of a nightly sweep.
+
+**Element indexing instead of screenshots.** The agent receives a numbered list
+of interactive elements rather than an image. Measured at **10.7x cheaper** in
+tokens on a representative page.
+
+**Trace record and deterministic replay.** A flow that succeeded once is a
+script. The expensive part, working out what to click, has already been done.
+Replaying a recorded trace with ranked selectors and per-step expectations costs
+**zero model calls**. Only a page that actually changed needs thinking.
+
+**Replay first, model as fallback.** If replay stops at a changed step, the
+agent resumes from exactly that step rather than starting over.
+
+A full sweep of unchanged flows can therefore run with **no API key at all**.
+
+### Memory: nothing is ever deleted
+
+Per project, append-only, on disk via `node:sqlite` with no external dependency.
+It records:
+
+- Every failure, with a stable fingerprint so recurrence is detectable
+- Every fix attempt, **including the ones that failed**, with the reasoning
+- Whether the fix actually held days later
+- Lessons derived across cases
+
+The write path is a single `append()` function. There is no `update()` and no
+`delete()`, by construction rather than by policy.
+
+When a new failure arrives, five matchers score similarity (fingerprint, file
+overlap, lexical, location, class). If this exact defect has occurred before,
+the prompt leads with a blunt warning and then lists **approaches already tried
+and rejected**, so the loop does not waste cycles re-deriving them.
+
+Storing the failures is the point. A diff tells you what was done. Only the
+reasoning tells you what was believed and whether that belief held.
+
+### Cohort analysis
+
+A failure that hits everyone equally is a bug. A failure that hits only mobile
+Safari users in one country is a different bug with a different cause, and
+averages hide it completely.
+
+Each group is compared against everyone else with a **two-proportion z-test**,
+then three gates apply, and they exist to stop the analysis producing confident
+nonsense:
+
+- **Minimum sample size.** A 75 percent failure rate across 12 sessions is not a
+  finding.
+- **Effect size threshold.** A statistically real 1.10x difference is not worth a
+  human's attention.
+- **Bonferroni correction.** Testing 200 cohorts at p < 0.05 produces 10 false
+  positives by definition. The correction is applied, and the suite contains a
+  case that passes uncorrected and correctly fails corrected.
+
+---
+
+## Measured results
+
+Real measurements from the test suite in this repository, not projections. Where
+a number has a caveat, the caveat is stated.
+
+### Retrieval
+
+Measured on a 12-query benchmark (`test/retrieve-eval.ts`) against this
+repository: 115 files, 704 chunks.
+
+| Stage | recall@1 | recall@3 | recall@5 | MRR |
+|---|---|---|---|---|
+| Baseline | 33% | 67% | 67% | 0.486 |
+| Plus stemming | 42% | 67% | 67% | 0.528 |
+| Plus untracked-file fix | 67% | 92% | 92% | 0.790 |
+| Plus base memory | **83%** | **92%** | **100%** | **0.896** |
+
+The largest single jump came from a bug, not a feature. `git ls-files` returns
+only *tracked* files, so 45 of 88 source files were invisible to retrieval, and
+invisible *silently*, producing a confidently wrong answer rather than an error.
+That is exactly backwards for a tool that investigates fresh breakage, because
+the code most likely to be at fault is the code somebody just wrote.
+
+**Caveat that matters:** base memory in this benchmark was enriched by a mock
+provider, because the measurement was taken without an API key. The plumbing and
+the vocabulary bridge are real and verified. The quality of genuine model
+summaries is untested, and the 0.3 weight is tuned on 12 queries, which is too
+few to trust a peak. The weight sits at the centre of the flat region of a
+parameter sweep rather than at the argmax for exactly that reason.
+
+`recall@3` is the number that matters in practice, because the fix agent is
+handed roughly 10 chunks. `recall@1` is a stricter bar than the system requires.
+
+### Browsing agent
+
+| Measurement | Result |
+|---|---|
+| Element indexing vs screenshot | 103 tokens vs roughly 1100, **10.7x cheaper** |
+| Replay of an unchanged flow | 2 steps in 629ms, **0 model calls** |
+| Replay when a step changed | Stops at the changed step, agent resumes there |
+
+### Cohort analysis
+
+On seeded data with a planted signal, the mobile checkout cohort is correctly
+identified as **25.5x worse** (68.2 percent versus 2.7 percent), while
+`/pricing`, which is uniformly bad for everyone, is correctly excluded because it
+is not a cohort effect.
+
+### Closed loop
+
+`test/closed-loop.test.ts` runs the whole loop against a genuinely broken page
+using real Chromium, real HTTP and real file writes, with a stubbed model for
+determinism. The run captures the property the design exists for:
+
+```
+confirmed broken: PASS - Order placed! is shown.
+```
+
+The UI reported success. The loop overruled it because no order reached the
+server, applied a fix, re-drove the journey, and verified against the order
+count.
+
+---
+
+## CLI reference
+
+```
+npm run cli -- <command>
+```
+
+### Understanding the codebase
+
+| Command | What it does |
+|---|---|
+| `memory index --repo PATH` | Build base memory. `--no-enrich` for structural only, `--full` to re-index everything |
+| `memory` | What this project has learned: counts, lessons, hit rate |
+| `memory search "..."` | Find past failures similar to a description |
+| `retrieve --message "..."` | Find the code relevant to a failure |
+
+### Testing what works
+
+| Command | What it does |
+|---|---|
+| `sweep init` | Write a starter `recursive.flows.json` into the repo |
+| `sweep pr --base REF` | Test only the flows a diff put at risk. Gates a merge |
+| `sweep daily --max N` | Test every core flow plus the highest-risk remainder |
+| `sweep --repair` | Fix what breaks instead of only reporting it |
+| `sweep --dry-run` | Show the plan without running |
+| `sweep --watch` | Show the browser instead of running headless |
+| `sweep --engine E` | `internal` (fast, default) or `rhai` |
+
+### Repairing
+
+| Command | What it does |
+|---|---|
+| `repair FLOW_ID` | Fix a failing flow, verifying after every change |
+| `repair FLOW_ID --cycles N` | Cap attempts (default 4) |
+| `repair FLOW_ID --only PATHS` | Restrict which paths the agent may edit |
+| `repair FLOW_ID --no-pr` | Commit to the area branch without opening a pull request |
+| `repair FLOW_ID --dry-run` | Diagnose and verify, change nothing |
+
+### Detecting and containing
+
+| Command | What it does |
+|---|---|
+| `snapshot --dimensions URL,Device` | Pull Clarity data into the local time series |
+| `diagnose` | Rank friction issues from the latest snapshot |
+| `cohorts --dimension Device` | Find groups hit far harder than everyone else |
+| `incidents` | Correlate failures to the release that caused them |
+| `heal` | Tier 0 containment. `--dry-run` to see what it would do |
+| `containment` | Did the containment actually work? |
+| `audit` | The full decision trail, including blocked actions |
+
+### Other
+
+| Command | What it does |
+|---|---|
+| `demo` | Run a seeded silent-breakage scenario end to end |
+| `projects` | List configured projects and their autonomy settings |
+| `engines` | Which coding engines are available, and their licence position |
+| `status` | Current state |
+
+---
+
+## Web dashboard
+
+A Next.js 15 application in `apps/web`, built with shadcn/ui primitives.
+
+```bash
+cd apps/web
+npm install
+npm run dev        # http://localhost:4400
+```
+
+Pages:
+
+- `/` landing page
+- `/signup` and `/login`
+- `/device` terminal approval for `recursive login`
+- `/dashboard` every run, newest first
+- `/dashboard/runs/[id]` one run in full, with the complete timeline
+- `/dashboard/insights` is Recursive actually working
+
+The run detail page is the important one. When Recursive claims it fixed
+something, that page has to be enough to check the claim without trusting it:
+which files retrieval surfaced, what it believed was wrong, what it changed, and
+what happened when the journey was re-driven afterwards. Runs that failed get the
+same treatment, because a system that only shows its wins is not auditable.
+
+Two rules govern the insights page:
+
+1. Every rate carries its denominator. A percentage without a sample size is a
+   lie waiting to happen.
+2. "Not enough data yet" is shown as itself rather than as 0 percent, because a
+   confident zero reads as failure when it actually means silence.
+
+**Authentication** uses a device-code flow, the same shape as `gh auth login`.
+The CLI never sees a password. It polls with a device code and receives a token
+only after a human who is already signed in approves it in a browser. Signing
+out revokes the session server-side rather than only clearing the cookie, so a
+captured token is dead everywhere rather than merely unsent by one browser.
+
+---
+
+## Configuration
+
+All configuration is via `.env`. Copy `.env.example` and fill it in.
+
+| Variable | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY` | Claude, the default provider |
+| `LLM_PROVIDER` | `anthropic` or `openai` |
+| `OPENAI_BASE_URL` | Any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio) |
+| `OPENAI_MODEL` | Model name for that endpoint |
+| `TARGET_REPO_PATH` | The repository Recursive may edit |
+| `CLARITY_API_TOKEN` | Microsoft Clarity Data Export API |
+| `FIX_ENGINE` | `claude-agent-sdk` or `openhands` |
+
+### Coding engines
+
+| Engine | Licence | Zero egress | When to use |
+|---|---|---|---|
+| Claude Agent SDK (default) | Anthropic Commercial Terms | No, prompts reach the API | Best available quality |
+| OpenHands | MIT | Yes, point it at a model you host | Source cannot leave the network (BFSI, regulated GCC work) |
+
+Both produce the same thing: edits in a working tree that the loop then measures
+and keeps or reverts. Nothing downstream of that interface knows or cares which
+engine ran.
+
+### Microsoft Clarity limits
+
+Worth knowing before designing around it. The Data Export API allows **10
+requests per project per day**, a **1 to 3 day lookback**, **1000 rows**, **no
+pagination**, and a maximum of **3 dimensions per call**.
+
+This is why Clarity drives target *selection* but is never used as the scorer
+inside a hill-climb. Ten calls a day cannot measure an optimisation loop. A fast
+local probe does that, and Clarity confirms the result afterwards.
+
+---
+
+## Security and privacy
+
+**Keys belong in `.env` and nowhere else.** Never in a chat message, a ticket or
+a commit. `.env` is gitignored. Any key that has been pasted anywhere should be
+treated as compromised and rotated.
+
+**PII scrubbing runs in two passes**, once at the SDK edge and once on server
+ingest. The scrubber ordering is load-bearing, and any change to it needs a test
+against a payload carrying every secret type. A 10-case regression suite exists
+because an earlier version leaked a bearer token: the pattern matched only the
+word "Bearer" and left the credential behind. Indian mobile numbers were not
+caught at all.
+
+**Memory holds code, failures and reasoning. It does not hold personal data.**
+
+**Guardrails, statistics, probe scoring and PII scrubbing are deterministic.**
+They are auditable and have no network dependency. This is deliberate. A model
+deciding whether an automated production action is permitted would make the
+system unreviewable.
+
+**The web database is never committed.** It holds account rows, password hashes
+and live session tokens. Passwords use scrypt with per-account salts and
+constant-time comparison. Session tokens are stored hashed.
+
+---
+
+## Testing
+
+```bash
+npm run typecheck                    # tsc, no emit
+npm test                             # scrub, retrieve, memory, cohort (41 checks)
+npm run test:loop                    # the full closed repair loop, real browser
+npm run test:browse                  # browsing agent, needs: node fixtures/serve.mjs &
+npm run eval:retrieve . demo-shop    # the retrieval benchmark
+```
+
+The tests are written as regressions against failures actually found by
+measurement, and each documents the failure it pins down. A few examples:
+
+- BM25 length normalization ranked the correct file 13th
+- The PII scrubber persisted a bearer token it claimed to redact
+- The same feature flag was contained twice, because the cooldown was per
+  incident rather than per target
+- The symbol index matched the English word "signals", because it was a local
+  variable in five files
+
+`test/closed-loop.test.ts` is the most valuable one. It runs the entire repair
+loop end to end with no API key, against a page broken in the specific way that
+motivates the whole project.
+
+---
+
+## Limitations and what is not done
+
+Stated plainly, because a README that only lists strengths is not useful.
+
+- **Nothing writes runs to the dashboard yet.** The API, storage and pages are
+  proven end to end, but the CLI does not POST to `/api/runs`. Every run visible
+  in a fresh dashboard is seeded. Connecting `repairFlow` and `sweep` to it is
+  the next step.
+- **Base memory enrichment quality is unmeasured.** All benchmarks used a mock
+  enrichment provider. The retrieval plumbing is verified, the model output
+  quality is not.
+- **The retrieval benchmark is 12 queries on one repository.** Enough to catch a
+  regression, far too few to claim generality.
+- **Tier 2 does not exist and is not planned.** Recursive stops at a pull
+  request.
+- **The retrieval benchmark file is excluded from its own results**, because it
+  contains every query verbatim and would otherwise rank top for all of them.
+- **Cohort analysis needs volume.** At low traffic the sample-size gate will
+  correctly refuse to report anything, which is right but can look like the
+  feature is broken.
+- **Not yet run against a large production codebase.**
+
+---
+
+## Repository layout
+
+```
 src/
-  clarity/              # API client, budget ledger, JSONL time series, fixtures
-  diagnose/             # friction extraction, severity ranking, trends
-  score/                # instrumentation + probes + composite scorer
-  agents/               # investigate, research, fix (Agent SDK)
-  loop/
-    inner.ts            # the AutoResearch hill-climb
-    ship.ts             # branch + PR + shipped registry
-    outer.ts            # Clarity verification + probe calibration
-data/                   # snapshots, budget ledger, run journals, calibration
+  clarity/      Clarity client, budget ledger, mock data
+  detect/       Signal ingest, health, incident correlation
+  diagnose/     Issue extraction, severity ranking, cohort analysis
+  retrieve/     BM25, symbols, import graph, stack parsing, RRF fusion
+  memory/       Append-only store, base memory, matching, recall
+  repo/         Git as change oracle, area classification, branches
+  browse/       Internal browsing agent: observe, trace, replay, pool
+  sweep/        Flow manifest, risk scoring, verification, backend checks
+  loop/         Inner hill-climb, outer loop, closed repair loop, debugger
+  agents/       Investigation, research, coding-engine adapters
+  heal/         Tier 0 containment and guardrails
+  llm/          Provider abstraction (Anthropic, any OpenAI-compatible)
+  score/        Headless probes and instrumentation
+
+apps/web/       Next.js dashboard
+packages/       Browser SDK and server SDK
+test/           Regression suites and the retrieval benchmark
+fixtures/       Static pages for browsing-agent tests
+docs/           Additional notes
+ARCHITECTURE.md Deeper design rationale
+program.md      Product context, treated as binding by the agents
 ```
+
+---
+
+## Status
+
+Working prototype under active development. The pipeline runs end to end and
+every measurement above is reproducible from the test suite. The honest reading
+of the limitations section is that the machinery is real while the evidence base
+is still small.

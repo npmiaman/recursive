@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Demo shop</title>
+    <style>
+      body { font: 16px/1.6 system-ui, sans-serif; margin: 0; padding: 40px; }
+      .cta { display: inline-block; margin-top: 16px; padding: 12px 22px;
+             background: #1a1a1a; color: #fff; border-radius: 8px; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <h1>Demo shop</h1>
+    <p>A deliberately imperfect site, used to exercise the probe and the synthetic journeys.</p>
+    <a class="cta" href="/pricing/">Get started</a>
+
+    <!-- The SDK, as a customer would install it. -->
+    <script src="/recursive.js"></script>
+    <script>
+      Recursive.init({
+        projectId: "demo-shop",
+        endpoint: "http://localhost:4318/v1/signals",
+        release: "2026.07.23-f9e8d7",
+        debug: true,
+      });
+    </script>
+  </body>
+</html>

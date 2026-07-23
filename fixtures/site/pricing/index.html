@@ -3,33 +3,33 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Pricing — demo</title>
+    <title>Pricing, demo</title>
     <style>
-      body { font: 16px/1.6 system-ui, sans-serif; margin: 0; padding: 40px; color: #111; }
-      h1 { margin: 0 0 24px; }
+ body { font: 16px/1.6 system-ui, sans-serif; margin: 0; padding: 40px; color: #111; }
+ h1 { margin: 0 0 24px; }
       .tiers { display: flex; gap: 16px; flex-wrap: wrap; }
 
       /* DEFECT: looks interactive, is not. cursor:pointer + button-ish class,
-         but it's a plain div with no handler, no href, no role. This is the
-         canonical dead-click shape and what the probe should catch. */
+ but it's a plain div with no handler, no href, no role. This is the
+ canonical dead-click shape and what the probe should catch. */
       .tier-card {
-        cursor: pointer;
-        border: 1px solid #ddd;
-        border-radius: 10px;
-        padding: 24px;
-        width: 200px;
-        transition: border-color .15s;
+ cursor: pointer;
+ border: 1px solid #ddd;
+ border-radius: 10px;
+ padding: 24px;
+ width: 200px;
+ transition: border-color .15s;
       }
       .tier-card:hover { border-color: #888; }
 
       .cta {
-        display: inline-block;
-        margin-top: 32px;
-        padding: 12px 22px;
-        background: #1a1a1a;
-        color: #fff;
-        border-radius: 8px;
-        text-decoration: none;
+ display: inline-block;
+ margin-top: 32px;
+ padding: 12px 22px;
+ background: #1a1a1a;
+ color: #fff;
+ border-radius: 8px;
+ text-decoration: none;
       }
       .spacer { height: 1600px; }
     </style>
@@ -51,9 +51,9 @@
 
     <script>
       // A real listener, so the probe can distinguish live controls from dead ones.
-      document.querySelector(".cta").addEventListener("click", (e) => {
-        e.preventDefault();
-        document.title = "clicked";
+ document.querySelector(".cta").addEventListener("click", (e) => {
+ e.preventDefault();
+ document.title = "clicked";
       });
     </script>
   </body>

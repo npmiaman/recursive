@@ -5,8 +5,8 @@ import { config } from "../config.ts";
 
 /**
  * Shared Claude client for the reasoning stages (diagnosis, investigation,
- * research). The code-editing stage uses the Claude Agent SDK instead — see
- * agents/fix.ts — because it needs filesystem and bash tools.
+ * research). The code-editing stage uses the Claude Agent SDK instead, see
+ * agents/fix.ts, because it needs filesystem and bash tools.
  *
  * A bare constructor is intentional: it resolves ANTHROPIC_API_KEY, then
  * ANTHROPIC_AUTH_TOKEN, then an `ant auth login` profile. Passing an explicit
@@ -28,7 +28,7 @@ export interface AskOptions {
 /**
  * Ask Claude for a structured answer validated against a Zod schema.
  * Returns the parsed object, or throws if the model refused or produced
- * something unparseable — callers should not have to defend against silent nulls.
+ * something unparseable, callers should not have to defend against silent nulls.
  */
 export async function askStructured<T extends z.ZodType>(
   schema: T,
@@ -57,9 +57,7 @@ export async function askStructured<T extends z.ZodType>(
     );
   }
   if (response.stop_reason === "max_tokens") {
-    throw new Error(
-      "Response hit max_tokens before completing — raise maxTokens for this stage.",
-    );
+    throw new Error("Response hit max_tokens before completing, raise maxTokens for this stage.");
   }
   if (!response.parsed_output) {
     throw new Error("Claude returned no parseable structured output.");
@@ -76,7 +74,11 @@ export async function askText(prompt: string, options: AskOptions = {}): Promise
     output_config: { effort: options.effort ?? "high" },
     ...(options.system ? { system: options.system } : {}),
     ...(options.webSearch
-      ? { tools: [{ type: "web_search_20260209" as const, name: "web_search" as const, max_uses: 6 }] }
+      ? {
+          tools: [
+            { type: "web_search_20260209" as const, name: "web_search" as const, max_uses: 6 },
+          ],
+        }
       : {}),
     messages: [{ role: "user", content: prompt }],
   });

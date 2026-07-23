@@ -115,7 +115,7 @@ export function seedScenario(options: SeedOptions = {}): Project {
       release: "2026.07.23-f9e8d7",
     });
   }
-  // Users escalate — they click it repeatedly before giving up.
+  // Users escalate, they click it repeatedly before giving up.
   for (let i = 0; i < 12; i++) {
     signal({
       cls: "rage-click",
@@ -151,8 +151,10 @@ export function seedScenario(options: SeedOptions = {}): Project {
         route: "/pricing",
         message: "Click on div.tier-card produced no response",
         selector: "div.tier-card",
-        // Spread across two weeks so it is neither novel nor release-correlated.
-        minutesAgo: i < 15 ? 5 + i : 60 * 24 * (3 + i),
+        // Half recent, half spread over the preceding days, but INSIDE the
+        // 14-day novelty lookback, so the fingerprint has history and the
+        // incident is correctly judged neither novel nor release-correlated.
+        minutesAgo: i < 15 ? 5 + i : 60 * 24 * (1 + (i % 10)),
       });
     }
   }

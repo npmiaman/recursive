@@ -10,13 +10,15 @@ import { askStructured } from "./claude.ts";
  * story and a pool of candidate fix directions for the hill-climb to explore.
  *
  * Producing several directions rather than one is deliberate. AutoResearch's
- * value comes from cheap parallel exploration — a single "obvious" fix that
+ * value comes from cheap parallel exploration, a single "obvious" fix that
  * fails wastes the whole run, whereas a ranked pool gives the loop somewhere to
  * go on iteration two.
  */
 
 const FixDirection = z.object({
-  title: z.string().describe("Short imperative name, e.g. 'Convert the pricing tier card to a real button'"),
+  title: z
+    .string()
+    .describe("Short imperative name, e.g. 'Convert the pricing tier card to a real button'"),
   rationale: z.string().describe("Why this should move the metric, tied to the evidence."),
   approach: z.string().describe("Concrete implementation guidance for the coding agent."),
   risk: z.enum(["low", "medium", "high"]).describe("Blast radius if this is wrong."),
@@ -33,7 +35,9 @@ const Investigation = z.object({
     .describe("Terms to search the target repo for, to locate the responsible component."),
   needsExternalResearch: z
     .boolean()
-    .describe("True if this looks like a known library/framework bug or needs external best-practice input."),
+    .describe(
+      "True if this looks like a known library/framework bug or needs external best-practice input.",
+    ),
   directions: z.array(FixDirection).min(1).max(4).describe("Candidate fixes, best first."),
 });
 
@@ -50,14 +54,14 @@ Your job is to explain the cause and propose concrete, minimal fixes.
 
 Rules:
 - Ground every claim in the evidence provided. If the evidence does not identify a
-  specific element or file, say so rather than inventing a selector.
+ specific element or file, say so rather than inventing a selector.
 - Prefer the smallest change that addresses the cause. Do not propose redesigns,
-  refactors, or new abstractions.
+ refactors, or new abstractions.
 - Accessibility and interaction correctness usually fix these symptoms at the root:
-  a div that looks clickable should usually become a real <button> or <a>, not gain
-  a click handler.
+ a div that looks clickable should usually become a real <button> or <a>, not gain
+ a click handler.
 - Distinguish "the control is missing" from "the control exists but fails". They
-  have different fixes and the probe evidence usually tells you which.`;
+ have different fixes and the probe evidence usually tells you which.`;
 
 export async function investigate(issue: Issue, score: Score): Promise<Investigation> {
   const prompt = `${programSection()}
@@ -74,7 +78,7 @@ ${issue.trend ? `- Trend: ${issue.trend.direction}, ${(issue.trend.delta * 100).
 
 ## Probe evidence (headless browser reproduction)
 
-Primary probe — ${score.primary.kind} — score ${score.primary.score.toFixed(3)} (0 = clean, 1 = fully broken)
+Primary probe, ${score.primary.kind}, score ${score.primary.score.toFixed(3)} (0 = clean, 1 = fully broken)
 ${score.primary.detail}
 
 Evidence:
@@ -82,9 +86,9 @@ Evidence:
 ${JSON.stringify(score.primary.evidence, null, 2).slice(0, 4000)}
 \`\`\`
 
-Other probes on the same page (these are regression guards — a fix must not worsen them):
+Other probes on the same page (these are regression guards, a fix must not worsen them):
 ${Object.entries(score.regression)
-  .map(([kind, r]) => `- ${kind}: ${r.score.toFixed(3)} — ${r.detail}`)
+  .map(([kind, r]) => `- ${kind}: ${r.score.toFixed(3)}, ${r.detail}`)
   .join("\n")}
 
 ## Task

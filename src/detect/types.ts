@@ -4,26 +4,78 @@ import { createHash } from "node:crypto";
  * The unified signal model.
  *
  * The central design decision in Recursive: a rage click and an uncaught
- * exception are the SAME KIND OF THING — evidence that the product is not doing
+ * exception are the SAME KIND OF THING, evidence that the product is not doing
  * what the user asked. One has a stack trace and one doesn't. Treating them as
  * separate systems is why silent breakage goes undetected for weeks.
  */
 
 export type SignalClass =
-  // Loud — something threw.
+  // Loud, client, something threw in the browser.
   | "exception"
   | "unhandled-rejection"
   | "failed-request"
-  // Silent — nothing threw, but the product didn't work.
+  // Loud, server, the backend failed.
+  | "server-error"
+  | "api-error"
+  | "timeout"
+  | "crash"
+  // Silent, nothing threw, but the product didn't work.
   | "dead-click"
   | "rage-click"
   | "abandon"
-  // Synthetic — a check we ran ourselves, no user required.
+  // Correctness, it ran, and produced the wrong thing.
+  | "data-error"
+  | "assertion-failed"
+  // Pipeline, broken before it ever reached a user.
+  | "test-failure"
+  | "build-failure"
+  // Degradation, working, but not acceptably.
+  | "performance-regression"
+  | "slow"
+  // Synthetic, a check we ran ourselves, no user required.
   | "health-check-failed"
-  | "slow";
+  /**
+   * A browsing agent completed (or failed) a real user journey. Distinct from
+   * health-check-failed because the evidence is a transcript of what the agent
+   * tried and saw, which is a far richer diagnosis input than an assertion.
+   */
+  | "flow-failure";
 
-export const LOUD_CLASSES: SignalClass[] = ["exception", "unhandled-rejection", "failed-request"];
-export const SILENT_CLASSES: SignalClass[] = ["dead-click", "rage-click", "abandon"];
+export const LOUD_CLASSES: SignalClass[] = [
+  "exception",
+  "unhandled-rejection",
+  "failed-request",
+  "server-error",
+  "api-error",
+  "timeout",
+  "crash",
+  "assertion-failed",
+  "flow-failure",
+];
+
+export const SILENT_CLASSES: SignalClass[] = [
+  "dead-click",
+  "rage-click",
+  "abandon",
+  "data-error",
+  "performance-regression",
+];
+
+/**
+ * Failures caught before a user ever sees them. Worth separating because the
+ * response differs: there is nothing to contain, no user is affected yet, so
+ * these skip Tier 0 entirely and go straight to repair.
+ */
+export const PIPELINE_CLASSES: SignalClass[] = ["test-failure", "build-failure"];
+
+export function isPipeline(cls: SignalClass): boolean {
+  return PIPELINE_CLASSES.includes(cls);
+}
+
+/** Does this failure class normally carry a stack trace? Drives retrieval. */
+export function hasStackTrace(cls: SignalClass): boolean {
+  return LOUD_CLASSES.includes(cls) || cls === "test-failure" || cls === "build-failure";
+}
 
 export function isSilent(cls: SignalClass): boolean {
   return SILENT_CLASSES.includes(cls);
@@ -71,7 +123,7 @@ export interface Signal {
 /**
  * Stable grouping key.
  *
- * Message text is normalized before hashing — ids, hex, numbers and quoted
+ * Message text is normalized before hashing, ids, hex, numbers and quoted
  * strings vary per occurrence and would otherwise shatter one defect into
  * thousands of "distinct" signals.
  */
@@ -101,15 +153,10 @@ export function fingerprint(input: {
   return createHash("sha256").update(basis).digest("hex").slice(0, 16);
 }
 
-/** Confidence that we know what caused an incident — gates autonomous action. */
+/** Confidence that we know what caused an incident, gates autonomous action. */
 export type Confidence = "high" | "medium" | "low";
 
-export type IncidentStatus =
-  | "open"
-  | "contained"
-  | "repairing"
-  | "resolved"
-  | "escalated";
+export type IncidentStatus = "open" | "contained" | "repairing" | "resolved" | "escalated";
 
 export interface Incident {
   id: string;
@@ -134,7 +181,7 @@ export interface Incident {
   /** 0..100. */
   severity: number;
   status: IncidentStatus;
-  /** Why we reached this confidence — shown to humans, logged for audit. */
+  /** Why we reached this confidence, shown to humans, logged for audit. */
   reasoning: string[];
 }
 
