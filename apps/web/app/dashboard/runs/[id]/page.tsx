@@ -24,10 +24,10 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
 
   // Scoped by account inside the query, not filtered after, this is the only
   // thing standing between one customer's runs and another's.
-  const run = getRun(account.id, id);
+  const run = await getRun(account.id, id);
   if (!run) notFound();
 
-  const events = getRunEvents(run.id);
+  const events = await getRunEvents(run.id);
   const outcome = (run.payload["outcome"] ?? {}) as Record<string, unknown>;
 
   return (

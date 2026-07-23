@@ -28,7 +28,7 @@ const UPSTREAM = (process.env.MODEL_UPSTREAM_BASE || "https://integrate.api.nvid
 const KEY = process.env.MODEL_UPSTREAM_KEY; // the shared nvapi key, server-side only
 
 async function handle(request: Request, path: string[]): Promise<Response> {
-  const account = accountFromAuthHeader(request.headers.get("authorization"));
+  const account = await accountFromAuthHeader(request.headers.get("authorization"));
   if (!account) {
     return NextResponse.json(
       { error: "Not signed in. Run `recursive login` to connect this terminal." },
@@ -65,7 +65,7 @@ async function handle(request: Request, path: string[]): Promise<Response> {
         model?: string;
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
-      recordUsage({
+      await recordUsage({
         accountId: account.id,
         model: json.model ?? "unknown",
         promptTokens: json.usage?.prompt_tokens ?? 0,

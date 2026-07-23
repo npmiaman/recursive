@@ -15,9 +15,9 @@ export const dynamic = "force-dynamic";
  */
 export default async function UsagePage() {
   const account = (await currentAccount())!;
-  const mine = usageForAccount(account.id);
-  const owner = isOwner(account.id);
-  const team = owner ? usageAllAccounts() : null;
+  const mine = await usageForAccount(account.id);
+  const owner = await isOwner(account.id);
+  const team = owner ? await usageAllAccounts() : null;
 
   return (
     <div className="space-y-8">

@@ -26,7 +26,7 @@ export const dynamic = "force-dynamic";
  */
 export default async function InsightsPage() {
   const account = (await currentAccount())!;
-  const insights = computeInsights(account.id);
+  const insights = await computeInsights(account.id);
 
   if (insights.totalRuns === 0) {
     return (

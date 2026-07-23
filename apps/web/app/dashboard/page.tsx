@@ -27,11 +27,11 @@ export default async function OverviewPage() {
   const proto = host.startsWith("localhost") ? "http" : "https";
   const dashboardUrl = `${proto}://${host}`;
 
-  const terminals = listCliTokens(account.id);
-  const usage = usageForAccount(account.id);
-  const runs = listRuns(account.id, 5);
-  const owner = isOwner(account.id);
-  const team = owner ? usageAllAccounts() : null;
+  const terminals = await listCliTokens(account.id);
+  const usage = await usageForAccount(account.id);
+  const runs = await listRuns(account.id, 5);
+  const owner = await isOwner(account.id);
+  const team = owner ? await usageAllAccounts() : null;
 
   const connected = terminals.length > 0;
 

@@ -18,7 +18,7 @@ import { clearSessionCookie, currentSessionToken } from "@/lib/session";
  */
 export async function POST() {
   const token = await currentSessionToken();
-  if (token) revokeToken(token);
+  if (token) await revokeToken(token);
   await clearSessionCookie();
   return NextResponse.json({ ok: true });
 }

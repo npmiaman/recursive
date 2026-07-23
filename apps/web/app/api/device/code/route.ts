@@ -3,7 +3,7 @@ import { createDeviceCode } from "@/lib/db";
 
 /** Step 1 of the device flow: the CLI asks for a code. No auth required yet. */
 export async function POST() {
-  const { deviceCode, userCode } = createDeviceCode();
+  const { deviceCode, userCode } = await createDeviceCode();
   return NextResponse.json({
     deviceCode,
     userCode,

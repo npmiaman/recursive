@@ -17,7 +17,7 @@ export const dynamic = "force-dynamic";
  */
 export default async function RunsPage() {
   const account = (await currentAccount())!;
-  const runs = listRuns(account.id, 100);
+  const runs = await listRuns(account.id, 100);
 
   if (runs.length === 0) return <EmptyState />;
 

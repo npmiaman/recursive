@@ -11,10 +11,10 @@ export async function POST(request: Request) {
   if (!body.userCode) return NextResponse.json({ error: "Missing code." }, { status: 400 });
 
   if (body.action === "deny") {
-    denyDeviceCode(body.userCode);
+    await denyDeviceCode(body.userCode);
     return NextResponse.json({ ok: true, status: "denied" });
   }
-  const ok = approveDeviceCode(body.userCode, account.id);
+  const ok = await approveDeviceCode(body.userCode, account.id);
   if (!ok) {
     return NextResponse.json({ error: "That code is invalid or has expired." }, { status: 400 });
   }

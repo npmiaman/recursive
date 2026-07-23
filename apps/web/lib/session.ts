@@ -48,7 +48,7 @@ export async function currentSessionToken(): Promise<string | undefined> {
 }
 
 /** Bearer-token auth for the CLI's API calls. */
-export function accountFromAuthHeader(header: string | null): Account | undefined {
+export async function accountFromAuthHeader(header: string | null): Promise<Account | undefined> {
   if (!header?.startsWith("Bearer ")) return undefined;
   return resolveToken(header.slice(7).trim());
 }

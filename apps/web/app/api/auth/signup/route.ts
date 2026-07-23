@@ -18,14 +18,14 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
-  if (findAccountByEmail(email)) {
+  if (await findAccountByEmail(email)) {
     return NextResponse.json(
       { error: "An account with that email already exists." },
       { status: 409 },
     );
   }
 
-  const account = createAccount(email, password, body.name);
-  await setSessionCookie(issueToken(account.id, "web"));
+  const account = await createAccount(email, password, body.name);
+  await setSessionCookie(await issueToken(account.id, "web"));
   return NextResponse.json({ account: { id: account.id, email: account.email } });
 }
