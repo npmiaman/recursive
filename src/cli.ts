@@ -72,6 +72,7 @@ SWEEP, browsing-agent regression runs (rhai)
                         --repair fix what breaks, don't just report it
 
 REPAIR. Tier 1: change the code until the flow actually passes
+ login [url]         Connect this terminal to your dashboard account (shared model, no key here).
  config              Model config, once, for every project.
                         config nvidia <key>        free NVIDIA (40 RPM), for testing
                         config anthropic <key>     paid Claude, for launch
@@ -548,6 +549,100 @@ async function cmdConfig(): Promise<void> {
   }
   setVar(sub, value);
   console.log(`Set ${sub} globally in ${globalEnv} (used by Recursive in every project).`);
+}
+
+/**
+ * `recursive login`, connect this terminal to a dashboard account.
+ *
+ * This is the account model the user asked for: you sign up once on the
+ * dashboard, then `recursive login` on any machine connects that same account.
+ * From then on the terminal routes its model calls through the dashboard's
+ * shared-key gateway, authenticated as your account, so:
+ *
+ *   - no model key is ever stored on the laptop (the dashboard holds it),
+ *   - the dashboard meters exactly which account used how much of the shared
+ *     key.
+ *
+ * The flow is the device-code flow (like `gh auth login`): the CLI shows a code,
+ * you approve it in the already-signed-in browser, and the CLI receives a token.
+ */
+async function cmdLogin(): Promise<void> {
+  const os = await import("node:os");
+  const fs = await import("node:fs");
+  const dashboard = (process.argv[3] ?? process.env["RECURSIVE_DASHBOARD_URL"] ?? "http://localhost:4400").replace(/\/+$/, "");
+  const globalEnv = resolve(os.homedir(), ".recursive", ".env");
+
+  const setVar = (key: string, value: string): void => {
+    fs.mkdirSync(resolve(os.homedir(), ".recursive"), { recursive: true });
+    const lines = fs.existsSync(globalEnv) ? fs.readFileSync(globalEnv, "utf8").split("\n") : [];
+    const kept = lines.filter((l) => l.trim() && !l.startsWith(`${key}=`));
+    kept.push(`${key}=${value}`);
+    fs.writeFileSync(globalEnv, kept.join("\n") + "\n", { mode: 0o600 });
+  };
+
+  console.log(`\nConnecting to ${dashboard}\n`);
+
+  let device: { deviceCode: string; userCode: string; verificationUrl?: string };
+  try {
+    const res = await fetch(`${dashboard}/api/device/code`, { method: "POST" });
+    if (!res.ok) throw new Error(`the dashboard returned ${res.status}`);
+    device = (await res.json()) as typeof device;
+  } catch (error) {
+    console.error(`Could not reach the dashboard at ${dashboard}: ${error instanceof Error ? error.message : error}`);
+    console.error(`Pass the URL explicitly:  recursive login https://your-dashboard`);
+    process.exit(1);
+  }
+
+  console.log(`  1. Open:   ${dashboard}/device`);
+  console.log(`  2. Enter:  ${device.userCode}`);
+  console.log(`\n  (or go straight to ${dashboard}/device?code=${device.userCode})`);
+  console.log(`\nWaiting for approval…`);
+
+  // Poll until approved, denied, or expired.
+  const started = Date.now();
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 3000));
+    if (Date.now() - started > 10 * 60_000) {
+      console.error("\nTimed out waiting for approval.");
+      process.exit(1);
+    }
+    let poll: { status: string; token?: string; email?: string };
+    try {
+      const res = await fetch(`${dashboard}/api/device/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceCode: device.deviceCode }),
+      });
+      poll = (await res.json()) as typeof poll;
+    } catch {
+      continue; // transient; keep polling
+    }
+
+    if (poll.status === "denied") {
+      console.error("\nRequest denied in the browser.");
+      process.exit(1);
+    }
+    if (poll.status === "expired") {
+      console.error("\nThe code expired. Run `recursive login` again.");
+      process.exit(1);
+    }
+    if (poll.status === "approved" && poll.token) {
+      // Route the model through the dashboard gateway, authenticated as this
+      // account. No model key is stored locally; the dashboard holds it.
+      setVar("RECURSIVE_DASHBOARD_URL", dashboard);
+      setVar("RECURSIVE_TOKEN", poll.token);
+      setVar("LLM_PROVIDER", "openai");
+      setVar("OPENAI_BASE_URL", `${dashboard}/api/model/v1`);
+      setVar("OPENAI_MODEL", "deepseek-ai/deepseek-v4-flash");
+      setVar("OPENAI_API_KEY", poll.token);
+      setVar("OPENAI_RPM", "40");
+      setVar("FIX_ENGINE", "agentic");
+      console.log(`\n  ✓ Connected as ${poll.email ?? "your account"}.`);
+      console.log(`  This machine now uses the shared model via the dashboard. No key stored here.`);
+      console.log(`  Verify with:  recursive doctor\n`);
+      return;
+    }
+  }
 }
 
 /**
@@ -1292,6 +1387,9 @@ async function main(): Promise<void> {
       return cmdFix();
     case "verify":
       return cmdVerify();
+    case "login":
+      await cmdLogin();
+      break;
     case "config":
       await cmdConfig();
       break;

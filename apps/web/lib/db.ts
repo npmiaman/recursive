@@ -74,6 +74,20 @@ db.exec(`
  data TEXT,
     PRIMARY KEY (run_id, seq)
   );
+
+  -- One row per model call routed through the shared-key gateway. This is how
+  -- the dashboard knows which account used how much of the shared key.
+  CREATE TABLE IF NOT EXISTS usage (
+ id TEXT PRIMARY KEY,
+ account_id TEXT NOT NULL,
+ at TEXT NOT NULL,
+ model TEXT NOT NULL,
+ prompt_tokens INTEGER NOT NULL DEFAULT 0,
+ completion_tokens INTEGER NOT NULL DEFAULT 0,
+ ok INTEGER NOT NULL DEFAULT 1,
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+  );
+  CREATE INDEX IF NOT EXISTS usage_account_at ON usage(account_id, at DESC);
 `);
 
 // ------------------------------------------------------------ accounts
@@ -462,6 +476,128 @@ export function computeInsights(accountId: string): Insights {
     medianDurationMs,
     recentFailures,
   };
+}
+
+// ------------------------------------------------------------ usage metering
+
+/** Record one model call routed through the shared-key gateway. */
+export function recordUsage(input: {
+  accountId: string;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  ok: boolean;
+}): void {
+  db.prepare(
+    `INSERT INTO usage (id, account_id, at, model, prompt_tokens, completion_tokens, ok)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    randomUUID(),
+    input.accountId,
+    new Date().toISOString(),
+    input.model,
+    input.promptTokens,
+    input.completionTokens,
+    input.ok ? 1 : 0,
+  );
+}
+
+export interface UsageSummary {
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  failedCalls: number;
+  /** Calls in the last 60 seconds, for the shared 40 RPM reality. */
+  callsLastMinute: number;
+  /** Per-day totals, oldest first, for a simple trend. */
+  daily: { day: string; calls: number; tokens: number }[];
+}
+
+function summarize(accountId: string | null): UsageSummary {
+  const where = accountId ? "WHERE account_id = ?" : "";
+  const args = accountId ? [accountId] : [];
+
+  const totals = db
+    .prepare(
+      `SELECT COUNT(*) c, COALESCE(SUM(prompt_tokens),0) p, COALESCE(SUM(completion_tokens),0) k,
+              COALESCE(SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END),0) f
+       FROM usage ${where}`,
+    )
+    .get(...args) as Record<string, number>;
+
+  const minuteAgo = new Date(Date.now() - 60_000).toISOString();
+  const lastMinute = db
+    .prepare(
+      `SELECT COUNT(*) c FROM usage ${where ? where + " AND" : "WHERE"} at > ?`,
+    )
+    .get(...args, minuteAgo) as Record<string, number>;
+
+  const daily = db
+    .prepare(
+      `SELECT substr(at,1,10) day, COUNT(*) calls, COALESCE(SUM(prompt_tokens+completion_tokens),0) tokens
+       FROM usage ${where} GROUP BY day ORDER BY day DESC LIMIT 14`,
+    )
+    .all(...args)
+    .map((r) => {
+      const row = r as Record<string, string | number>;
+      return { day: String(row["day"]), calls: Number(row["calls"]), tokens: Number(row["tokens"]) };
+    })
+    .reverse();
+
+  return {
+    calls: Number(totals["c"]),
+    promptTokens: Number(totals["p"]),
+    completionTokens: Number(totals["k"]),
+    totalTokens: Number(totals["p"]) + Number(totals["k"]),
+    failedCalls: Number(totals["f"]),
+    callsLastMinute: Number(lastMinute["c"]),
+    daily,
+  };
+}
+
+/** Usage for one account. */
+export function usageForAccount(accountId: string): UsageSummary {
+  return summarize(accountId);
+}
+
+/** Usage across everyone, plus a per-account breakdown. Owner-only view. */
+export function usageAllAccounts(): {
+  total: UsageSummary;
+  perAccount: { accountId: string; email: string; calls: number; totalTokens: number; lastUsedAt: string | null }[];
+} {
+  const perAccount = db
+    .prepare(
+      `SELECT a.id, a.email,
+              COUNT(u.id) calls,
+              COALESCE(SUM(u.prompt_tokens+u.completion_tokens),0) tokens,
+              MAX(u.at) last
+       FROM accounts a LEFT JOIN usage u ON u.account_id = a.id
+       GROUP BY a.id ORDER BY tokens DESC`,
+    )
+    .all()
+    .map((r) => {
+      const row = r as Record<string, string | number | null>;
+      return {
+        accountId: String(row["id"]),
+        email: String(row["email"]),
+        calls: Number(row["calls"] ?? 0),
+        totalTokens: Number(row["tokens"] ?? 0),
+        lastUsedAt: row["last"] ? String(row["last"]) : null,
+      };
+    });
+  return { total: summarize(null), perAccount };
+}
+
+/**
+ * The owner is the first account created, i.e. whoever set up this dashboard.
+ * Only the owner sees everyone's usage; a normal member sees only their own.
+ */
+export function isOwner(accountId: string): boolean {
+  const first = db
+    .prepare(`SELECT id FROM accounts ORDER BY created_at ASC LIMIT 1`)
+    .get() as Record<string, string> | undefined;
+  return !!first && first["id"] === accountId;
 }
 
 export { db };
