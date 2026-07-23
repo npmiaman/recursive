@@ -264,12 +264,33 @@ async function cmdDoctor(): Promise<void> {
 
   console.log(`\nRecursive doctor, checking ${repoPath} (project ${project.id})\n`);
 
-  // 1. Reasoning model reachable.
+  // 1. Reasoning model ACTUALLY WORKS.
+  //
+  // Not just preflight: a bad key routinely passes the shallow /models probe and
+  // then 403s on a real completion. doctor exists to catch exactly that false
+  // green, so it makes a real (tiny) call and reports what happened.
   await run("reasoning model", async () => {
     const { resolveProvider, describeProvider } = await import("./llm/provider.ts");
-    await resolveProvider().preflight();
+    const { z } = await import("zod");
     const d = describeProvider();
-    return ["pass", `${d.name} - ${d.model}`];
+    try {
+      await resolveProvider().structured(
+        z.object({ ok: z.boolean() }),
+        'Reply with exactly {"ok": true}.',
+        { maxTokens: 500 },
+      );
+      return ["pass", `${d.name} - ${d.model} (verified with a live call)`];
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // An auth / quota / network failure means the model is unusable, and that
+      // must be a FAIL, not a warning: every model-powered step will break.
+      if (/401|403|forbidden|authorization|unauthorized|credential|api key|enotfound|econnrefused|no content|quota|429/i.test(message)) {
+        return ["fail", `${d.model} configured but the live call failed: ${message.slice(0, 150)}`];
+      }
+      // Reached the model, but its output did not parse or validate. The key
+      // works; the model is just messy. Usable, worth flagging.
+      return ["warn", `${d.model} reachable but returned unexpected output: ${message.slice(0, 110)}`];
+    }
   });
 
   // 2. Code-editing engine ready. The Claude engine only warns when its key is
@@ -445,11 +466,14 @@ async function cmdInit(): Promise<void> {
       envPath,
       [
         "# Recursive configuration. This file is secret; add it to .gitignore.",
-        "# A free model powers indexing, diagnosis and code-writing:",
+        "# A free model powers indexing, diagnosis and code-writing.",
         "LLM_PROVIDER=openai",
         "OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1",
         "OPENAI_MODEL=deepseek-ai/deepseek-v4-flash",
-        "OPENAI_API_KEY=nvapi-...   # get a free key at build.nvidia.com",
+        "# Paste your key below (free at build.nvidia.com, no card). Leave it",
+        "# empty and `recursive doctor` will tell you the model is not working,",
+        "# rather than pretending it is.",
+        "OPENAI_API_KEY=",
         "OPENAI_RPM=40",
         "FIX_ENGINE=agentic",
         "",

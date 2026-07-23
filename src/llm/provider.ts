@@ -178,10 +178,29 @@ export class OpenAICompatibleProvider implements LLMProvider {
     // OpenAI proper, or a self-hosted model with its own limits.
     this.limiter = new RateLimiter(settings.rpm ?? 0);
     this.maxRetries = settings.maxRetries ?? 4;
-    // Anything not pointed at api.openai.com is assumed to be the customer's
-    // own infrastructure, which is the case this path mainly exists for.
-    this.selfHosted = !/api\.openai\.com/.test(this.baseUrl);
-    this.name = this.selfHosted ? `openai-compatible (${this.baseUrl})` : "openai";
+
+    // selfHosted drives the security messaging ("does code leave the network"),
+    // so it must mean self-hosted, not merely "not OpenAI". The old check
+    // labelled a NVIDIA hosted endpoint as self-hosted, which is exactly
+    // backwards: prompts DO leave the network. Base it on the host actually
+    // being local/private.
+    let host = "";
+    try {
+      host = new URL(this.baseUrl).hostname.toLowerCase();
+    } catch {
+      /* malformed url; treat as remote */
+    }
+    this.selfHosted =
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "0.0.0.0" ||
+      host === "::1" ||
+      host.endsWith(".local") ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+
+    this.name = host === "api.openai.com" ? "openai" : `openai-compatible (${this.baseUrl})`;
   }
 
   /**
