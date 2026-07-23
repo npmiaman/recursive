@@ -33,6 +33,7 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [name, setName] = React.useState("");
+  const [code, setCode] = React.useState("");
   const [error, setError] = React.useState<string>();
   const [pending, setPending] = React.useState(false);
 
@@ -47,7 +48,7 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
       const response = await fetch(`/api/auth/${mode}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(signup ? { email, password, name } : { email, password }),
+        body: JSON.stringify(signup ? { email, password, name, code } : { email, password }),
       });
       const data = (await response.json()) as { error?: string };
 
@@ -77,16 +78,27 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
         <CardContent>
           <form onSubmit={submit} className="space-y-4">
             {signup ? (
-              <div className="space-y-1.5">
-                <Label htmlFor="name">Name</Label>
-                <Input
-                  id="name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  autoComplete="name"
-                  placeholder="Optional"
-                />
-              </div>
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="name">Name</Label>
+                  <Input
+                    id="name"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    autoComplete="name"
+                    placeholder="Optional"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="code">Signup code</Label>
+                  <Input
+                    id="code"
+                    value={code}
+                    onChange={(e) => setCode(e.target.value)}
+                    placeholder="From the dashboard owner"
+                  />
+                </div>
+              </>
             ) : null}
 
             <div className="space-y-1.5">
