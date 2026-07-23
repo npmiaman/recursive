@@ -16,7 +16,7 @@
     "score": "npm run cli -- score",
     "fix": "npm run cli -- fix",
     "verify": "npm run cli -- verify",
-    "test": "node --experimental-strip-types --no-warnings test/scrub.test.ts && node --experimental-strip-types --no-warnings test/retrieve.test.ts && node --experimental-strip-types --no-warnings test/memory.test.ts && node --experimental-strip-types --no-warnings test/cohort.test.ts",
+    "test": "node --experimental-strip-types --no-warnings test/scrub.test.ts && node --experimental-strip-types --no-warnings test/retrieve.test.ts && node --experimental-strip-types --no-warnings test/memory.test.ts && node --experimental-strip-types --no-warnings test/cohort.test.ts && node --experimental-strip-types --no-warnings test/ratelimit.test.ts",
     "test:browse": "node --experimental-strip-types --no-warnings test/browse.test.ts",
     "eval:retrieve": "node --experimental-strip-types --no-warnings test/retrieve-eval.ts",
     "test:loop": "node --experimental-strip-types --no-warnings test/closed-loop.test.ts",

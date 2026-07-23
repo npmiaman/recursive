@@ -59,6 +59,14 @@ const Schema = z.object({
   llmProvider: z.enum(["anthropic", "openai"]).default("anthropic"),
   openAiBaseUrl: z.string().default("https://api.openai.com/v1"),
   openAiModel: z.string().default("gpt-4o-mini"),
+  /**
+   * Requests-per-minute cap for the OpenAI-compatible provider. 0 = no pacing.
+   * Set to a hosted free tier's limit (NVIDIA build.nvidia.com is 40) so a run
+   * that fires hundreds of enrichment calls does not trip the endpoint's 429s.
+   */
+  openAiRpm: z.number().default(0),
+  /** How many times to retry a 429 or 5xx before giving up. */
+  openAiMaxRetries: z.number().default(4),
 });
 
 export type Config = z.infer<typeof Schema> & {
@@ -90,6 +98,8 @@ const parsed = Schema.parse({
   llmProvider: (process.env.LLM_PROVIDER as "anthropic" | "openai") || "anthropic",
   openAiBaseUrl: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
   openAiModel: process.env.OPENAI_MODEL || "gpt-4o-mini",
+  openAiRpm: num(process.env.OPENAI_RPM, 0),
+  openAiMaxRetries: num(process.env.OPENAI_MAX_RETRIES, 4),
 });
 
 export const config: Config = {

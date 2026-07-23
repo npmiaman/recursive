@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { config } from "../config.ts";
 import { askStructured } from "../agents/claude.ts";
+import { RateLimiter, withRetry, parseRetryAfter, type RetryableError } from "./ratelimit.ts";
 
 /**
  * Model provider abstraction for the reasoning layer.
@@ -76,18 +77,26 @@ class AnthropicProvider implements LLMProvider {
  * OpenAI SDK deliberately: one less dependency, and self-hosted endpoints
  * routinely implement only a subset of the SDK's assumptions.
  */
-class OpenAICompatibleProvider implements LLMProvider {
+export class OpenAICompatibleProvider implements LLMProvider {
   readonly name: string;
   readonly selfHosted: boolean;
 
   private baseUrl: string;
   private model: string;
   private apiKey: string | undefined;
+  private limiter: RateLimiter;
+  private maxRetries: number;
 
-  constructor(settings: { baseUrl: string; model: string; apiKey?: string }) {
+  constructor(settings: { baseUrl: string; model: string; apiKey?: string; rpm?: number; maxRetries?: number }) {
     this.baseUrl = settings.baseUrl.replace(/\/+$/, "");
     this.model = settings.model;
     this.apiKey = settings.apiKey;
+    // Pace and retry are how a free hosted tier (NVIDIA build.nvidia.com at
+    // 40 RPM) becomes usable for a run that fires hundreds of requests. Both
+    // default to inert (rpm 0 = no pacing) so nothing changes for Anthropic,
+    // OpenAI proper, or a self-hosted model with its own limits.
+    this.limiter = new RateLimiter(settings.rpm ?? 0);
+    this.maxRetries = settings.maxRetries ?? 4;
     // Anything not pointed at api.openai.com is assumed to be the customer's
     // own infrastructure, which is the case this path mainly exists for.
     this.selfHosted = !/api\.openai\.com/.test(this.baseUrl);
@@ -114,28 +123,43 @@ class OpenAICompatibleProvider implements LLMProvider {
         JSON.stringify(jsonSchema),
     });
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+    const payload = await withRetry(
+      async () => {
+        // Pace INSIDE the retried function so a retry also waits for its slot,
+        // rather than a backing-off worker jumping the queue on its next try.
+        await this.limiter.acquire();
+
+        const response = await fetch(`${this.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+          },
+          body: JSON.stringify({
+            model: this.model,
+            messages,
+            max_tokens: options.maxTokens ?? 4000,
+            response_format: { type: "json_object" },
+          }),
+        });
+
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          const error: RetryableError = new Error(
+            `${this.name} returned ${response.status}: ${body.slice(0, 300)}`,
+          );
+          error.status = response.status;
+          // NVIDIA and most gateways send Retry-After on a 429; honour it
+          // rather than guessing a backoff.
+          error.retryAfterSeconds = parseRetryAfter(response.headers.get("retry-after"));
+          throw error;
+        }
+
+        return (await response.json()) as { choices?: { message?: { content?: string } }[] };
       },
-      body: JSON.stringify({
-        model: this.model,
-        messages,
-        max_tokens: options.maxTokens ?? 4000,
-        response_format: { type: "json_object" },
-      }),
-    });
+      { maxRetries: this.maxRetries },
+    );
 
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(`${this.name} returned ${response.status}: ${body.slice(0, 300)}`);
-    }
-
-    const payload = (await response.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
     const text = payload.choices?.[0]?.message?.content;
     if (!text) throw new Error(`${this.name} returned no content.`);
 
@@ -192,6 +216,8 @@ export function resolveProvider(): LLMProvider {
       baseUrl: config.openAiBaseUrl,
       model: config.openAiModel,
       apiKey: process.env["OPENAI_API_KEY"],
+      rpm: config.openAiRpm,
+      maxRetries: config.openAiMaxRetries,
     });
   } else {
     cached = new AnthropicProvider();
