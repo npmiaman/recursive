@@ -463,7 +463,10 @@ async function cmdConfig(): Promise<void> {
     return;
   }
 
-  // One-shot NVIDIA setup: the common case.
+  // One-shot provider setups: the common cases. Each writes the whole bundle so
+  // switching providers is a single command and never leaves a half-configured
+  // state. NVIDIA is the free testing tier (40 RPM, paced); anthropic and openai
+  // are the paid tiers to switch to at launch, where RPM pacing is turned off.
   if (sub === "nvidia") {
     if (!value || !value.startsWith("nvapi-")) {
       console.error("Usage: recursive config nvidia <nvapi-...key>   (free at build.nvidia.com)");
@@ -475,9 +478,40 @@ async function cmdConfig(): Promise<void> {
     setVar("OPENAI_API_KEY", value);
     setVar("OPENAI_RPM", "40");
     setVar("FIX_ENGINE", "agentic");
-    console.log(`\n  ✓ NVIDIA model configured globally (${globalEnv}).`);
-    console.log(`  Every project you run Recursive in will now use it. Verify with:`);
+    console.log(`\n  ✓ NVIDIA free model configured globally (${globalEnv}).`);
+    console.log(`  40 RPM, paced automatically. Every project will use it. Verify with:`);
     console.log(`    recursive doctor\n`);
+    return;
+  }
+
+  if (sub === "anthropic") {
+    if (!value || !value.startsWith("sk-ant-")) {
+      console.error("Usage: recursive config anthropic <sk-ant-...key>");
+      process.exit(1);
+    }
+    setVar("LLM_PROVIDER", "anthropic");
+    setVar("ANTHROPIC_API_KEY", value);
+    setVar("OPENAI_RPM", "0"); // paid: no free-tier pacing
+    setVar("FIX_ENGINE", "claude-agent-sdk"); // best code-editing engine, needs this key
+    console.log(`\n  ✓ Anthropic (paid) configured globally.`);
+    console.log(`  No RPM pacing. Switched the fix engine to claude-agent-sdk. Verify with:`);
+    console.log(`    recursive doctor\n`);
+    return;
+  }
+
+  if (sub === "openai") {
+    if (!value || !value.startsWith("sk-")) {
+      console.error("Usage: recursive config openai <sk-...key> [model]   (default gpt-4o)");
+      process.exit(1);
+    }
+    setVar("LLM_PROVIDER", "openai");
+    setVar("OPENAI_BASE_URL", "https://api.openai.com/v1");
+    setVar("OPENAI_MODEL", process.argv[5] ?? "gpt-4o");
+    setVar("OPENAI_API_KEY", value);
+    setVar("OPENAI_RPM", "0"); // paid: no free-tier pacing
+    setVar("FIX_ENGINE", "agentic");
+    console.log(`\n  ✓ OpenAI (paid) configured globally, model ${process.argv[5] ?? "gpt-4o"}.`);
+    console.log(`  No RPM pacing. Verify with:  recursive doctor\n`);
     return;
   }
 
