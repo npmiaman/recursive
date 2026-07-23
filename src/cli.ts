@@ -72,7 +72,10 @@ SWEEP, browsing-agent regression runs (rhai)
                         --repair fix what breaks, don't just report it
 
 REPAIR. Tier 1: change the code until the flow actually passes
- config              Set a model key once, used in every project (config nvidia <key>).
+ config              Model config, once, for every project.
+                        config nvidia <key>        free NVIDIA (40 RPM), for testing
+                        config anthropic <key>     paid Claude, for launch
+                        config proxy <url> <token>  a hosted proxy: no key on this laptop
  init                Set up Recursive in the current project (run this first).
  doctor              Check every subsystem works against a codebase.
                         --repo PATH       codebase to check
@@ -512,6 +515,29 @@ async function cmdConfig(): Promise<void> {
     setVar("FIX_ENGINE", "agentic");
     console.log(`\n  ✓ OpenAI (paid) configured globally, model ${process.argv[5] ?? "gpt-4o"}.`);
     console.log(`  No RPM pacing. Verify with:  recursive doctor\n`);
+    return;
+  }
+
+  // Point at a hosted proxy (apps/proxy) that holds the key server-side. This
+  // is what lets a laptop use the model with NO key of its own: it presents the
+  // shared proxy token, and the proxy swaps in the real key upstream.
+  if (sub === "proxy") {
+    if (!value) {
+      console.error("Usage: recursive config proxy <https://your-proxy/v1> [token]");
+      process.exit(1);
+    }
+    const token = process.argv[5];
+    setVar("LLM_PROVIDER", "openai");
+    setVar("OPENAI_BASE_URL", value.replace(/\/+$/, ""));
+    setVar("OPENAI_MODEL", "deepseek-ai/deepseek-v4-flash");
+    // The "key" a laptop holds is only the proxy token, not the upstream key.
+    // If the proxy is open (no token), a placeholder satisfies the client's
+    // "a key is present" check while the proxy ignores it.
+    setVar("OPENAI_API_KEY", token ?? "via-proxy");
+    setVar("OPENAI_RPM", "40");
+    setVar("FIX_ENGINE", "agentic");
+    console.log(`\n  ✓ Using the hosted proxy at ${value}. No model key stored on this machine.`);
+    console.log(`  Verify with:  recursive doctor\n`);
     return;
   }
 
