@@ -28,3 +28,4 @@ data/
 # Playwright
 test-results/
 playwright-report/
+supabase/.temp/

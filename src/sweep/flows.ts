@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Postcondition } from "./verify.ts";
 import { filesForJourney } from "../memory/base.ts";
+import { Repo } from "../repo/git.ts";
 
 /**
  * Flow manifest, the user-facing features rhai should exercise.
@@ -195,6 +196,74 @@ export function flowsAffectedBy(
   }
 
   return [...affected.values()];
+}
+
+/**
+ * Discover flows from the codebase instead of hand-writing them.
+ *
+ * Reads a framework's routes and emits a "does this page render" flow per route,
+ * so `init` produces a manifest that matches the REAL app rather than a fictional
+ * signup/checkout example. It covers the common case (a page loads and shows its
+ * content); the deeper journeys (fill this form, place that order) still want a
+ * human, but starting from the real routes is far better than starting from
+ * three made-up ones.
+ *
+ * Supports Next.js app router (`app/**\/page.tsx`) and pages router
+ * (`pages/**`). Dynamic routes (`[slug]`) are skipped because they need a value
+ * to visit. Returns empty for frameworks it does not recognise.
+ */
+export function discoverFlows(repoPath: string): Flow[] {
+  let files: string[];
+  try {
+    files = new Repo(repoPath).listFiles();
+  } catch {
+    return [];
+  }
+
+  const flows: Flow[] = [];
+  const seen = new Set<string>();
+
+  for (const file of files) {
+    let route: string | undefined;
+
+    const appMatch = /(?:^|\/)app\/(.*\/)?page\.(tsx|jsx|ts|js)$/.exec(file);
+    const pagesMatch = /(?:^|\/)pages\/(.+)\.(tsx|jsx|ts|js)$/.exec(file);
+
+    if (appMatch) {
+      const segs = (appMatch[1] ?? "")
+        .split("/")
+        .filter((s) => s && !/^\(.*\)$/.test(s)); // drop route groups like (marketing)
+      if (segs.some((s) => /\[.*\]/.test(s))) continue; // dynamic route, skip
+      route = "/" + segs.join("/");
+    } else if (pagesMatch) {
+      const rel = pagesMatch[1]!;
+      if (/^_(app|document|error)$/.test(rel) || rel.startsWith("api/")) continue;
+      const segs = rel.split("/").filter((s) => s && s !== "index");
+      if (segs.some((s) => /\[.*\]/.test(s))) continue;
+      route = "/" + segs.join("/");
+    } else {
+      continue;
+    }
+
+    route = route.replace(/\/+$/, "") || "/";
+    if (seen.has(route)) continue;
+    seen.add(route);
+
+    flows.push({
+      id: route === "/" ? "home" : route.slice(1).replace(/\//g, "-"),
+      name: `${route} renders`,
+      critical: route === "/",
+      url: route,
+      goal: `Load ${route} and confirm the page renders its main content, with no visible error or blank screen.`,
+      expect: `${route} renders its content without an error state.`,
+      touches: [file],
+      maxSteps: 4,
+      tier: "fast",
+    });
+  }
+
+  // Home first, then a stable order; cap so a big app does not emit hundreds.
+  return flows.sort((a, b) => (a.url === "/" ? -1 : b.url === "/" ? 1 : a.url.localeCompare(b.url))).slice(0, 15);
 }
 
 /** A starter manifest, written into a repo by `recursive sweep init`. */

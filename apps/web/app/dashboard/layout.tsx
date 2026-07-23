@@ -30,6 +30,9 @@ export default async function DashboardLayout({ children }: { children: React.Re
               <Link href="/dashboard/insights" className="hover:text-foreground">
                 Insights
               </Link>
+              <Link href="/dashboard/settings" className="hover:text-foreground">
+                Settings
+              </Link>
             </nav>
           </div>
           <div className="flex items-center gap-3">

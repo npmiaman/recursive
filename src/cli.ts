@@ -27,7 +27,7 @@ import { stats as memoryStats } from "./memory/store.ts";
 import { buildBaseMemory, baseMemoryStats } from "./memory/base.ts";
 import { findSimilarCases } from "./memory/match.ts";
 import { allLessons } from "./memory/recall.ts";
-import { EXAMPLE_MANIFEST, loadFlows } from "./sweep/flows.ts";
+import { EXAMPLE_MANIFEST, loadFlows, discoverFlows } from "./sweep/flows.ts";
 import { repairFlow } from "./loop/repair.ts";
 import { seedScenario, DEMO_PROJECT_ID } from "./demo.ts";
 
@@ -76,7 +76,6 @@ REPAIR. Tier 1: change the code until the flow actually passes
  config              Model config, once, for every project.
                         config nvidia <key>        free NVIDIA (40 RPM), for testing
                         config anthropic <key>     paid Claude, for launch
-                        config proxy <url> <token>  a hosted proxy: no key on this laptop
  init                Set up Recursive in the current project (run this first).
  doctor              Check every subsystem works against a codebase.
                         --repo PATH       codebase to check
@@ -478,7 +477,7 @@ async function cmdConfig(): Promise<void> {
     }
     setVar("LLM_PROVIDER", "openai");
     setVar("OPENAI_BASE_URL", "https://integrate.api.nvidia.com/v1");
-    setVar("OPENAI_MODEL", "deepseek-ai/deepseek-v4-flash");
+    setVar("OPENAI_MODEL", "deepseek-ai/deepseek-v4-pro"); // pro is more reliable on the hard diagnosis step
     setVar("OPENAI_API_KEY", value);
     setVar("OPENAI_RPM", "40");
     setVar("FIX_ENGINE", "agentic");
@@ -516,29 +515,6 @@ async function cmdConfig(): Promise<void> {
     setVar("FIX_ENGINE", "agentic");
     console.log(`\n  ✓ OpenAI (paid) configured globally, model ${process.argv[5] ?? "gpt-4o"}.`);
     console.log(`  No RPM pacing. Verify with:  recursive doctor\n`);
-    return;
-  }
-
-  // Point at a hosted proxy (apps/proxy) that holds the key server-side. This
-  // is what lets a laptop use the model with NO key of its own: it presents the
-  // shared proxy token, and the proxy swaps in the real key upstream.
-  if (sub === "proxy") {
-    if (!value) {
-      console.error("Usage: recursive config proxy <https://your-proxy/v1> [token]");
-      process.exit(1);
-    }
-    const token = process.argv[5];
-    setVar("LLM_PROVIDER", "openai");
-    setVar("OPENAI_BASE_URL", value.replace(/\/+$/, ""));
-    setVar("OPENAI_MODEL", "deepseek-ai/deepseek-v4-flash");
-    // The "key" a laptop holds is only the proxy token, not the upstream key.
-    // If the proxy is open (no token), a placeholder satisfies the client's
-    // "a key is present" check while the proxy ignores it.
-    setVar("OPENAI_API_KEY", token ?? "via-proxy");
-    setVar("OPENAI_RPM", "40");
-    setVar("FIX_ENGINE", "agentic");
-    console.log(`\n  ✓ Using the hosted proxy at ${value}. No model key stored on this machine.`);
-    console.log(`  Verify with:  recursive doctor\n`);
     return;
   }
 
@@ -606,7 +582,7 @@ async function cmdLogin(): Promise<void> {
       console.error("\nTimed out waiting for approval.");
       process.exit(1);
     }
-    let poll: { status: string; token?: string; email?: string };
+    let poll: { status: string; token?: string; email?: string; accountId?: string };
     try {
       const res = await fetch(`${dashboard}/api/device/token`, {
         method: "POST",
@@ -631,9 +607,11 @@ async function cmdLogin(): Promise<void> {
       // account. No model key is stored locally; the dashboard holds it.
       setVar("RECURSIVE_DASHBOARD_URL", dashboard);
       setVar("RECURSIVE_TOKEN", poll.token);
+      // The account id lets uploaded runs and metering attribute to this account.
+      if (poll.accountId) setVar("RECURSIVE_ACCOUNT_ID", poll.accountId);
       setVar("LLM_PROVIDER", "openai");
       setVar("OPENAI_BASE_URL", `${dashboard}/api/model/v1`);
-      setVar("OPENAI_MODEL", "deepseek-ai/deepseek-v4-flash");
+      setVar("OPENAI_MODEL", "deepseek-ai/deepseek-v4-pro"); // pro is more reliable on the hard diagnosis step
       setVar("OPENAI_API_KEY", poll.token);
       setVar("OPENAI_RPM", "40");
       setVar("FIX_ENGINE", "agentic");
@@ -687,8 +665,14 @@ async function cmdInit(): Promise<void> {
   if (fs.existsSync(manifest) && !flag("force")) {
     console.log(`  · recursive.flows.json already exists (kept)`);
   } else {
-    fs.writeFileSync(manifest, JSON.stringify({ ...EXAMPLE_MANIFEST, baseUrl }, null, 2) + "\n");
-    console.log(`  ✓ wrote recursive.flows.json (edit it to describe your real user journeys)`);
+    const discovered = discoverFlows(repoPath);
+    const manifestObj = discovered.length ? { baseUrl, flows: discovered } : { ...EXAMPLE_MANIFEST, baseUrl };
+    fs.writeFileSync(manifest, JSON.stringify(manifestObj, null, 2) + "\n");
+    console.log(
+      discovered.length
+        ? `  ✓ wrote recursive.flows.json (${discovered.length} flow(s) discovered from your routes)`
+        : `  ✓ wrote recursive.flows.json (edit it to describe your real user journeys)`,
+    );
   }
 
   // 3. Model config.
@@ -708,7 +692,7 @@ async function cmdInit(): Promise<void> {
         "# A free model powers indexing, diagnosis and code-writing.",
         "LLM_PROVIDER=openai",
         "OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1",
-        "OPENAI_MODEL=deepseek-ai/deepseek-v4-flash",
+        "OPENAI_MODEL=deepseek-ai/deepseek-v4-pro",
         "# Paste your key below (free at build.nvidia.com, no card). Leave it",
         "# empty and `recursive doctor` will tell you the model is not working,",
         "# rather than pretending it is.",
@@ -939,8 +923,12 @@ async function cmdSweep(): Promise<void> {
       console.error(`${target} already exists. Pass --force to overwrite.`);
       process.exit(1);
     }
-    fs.writeFileSync(target, JSON.stringify(EXAMPLE_MANIFEST, null, 2) + "\n");
-    console.log(`Wrote ${target}`);
+    const discovered = discoverFlows(repoPath);
+    const manifest = discovered.length
+      ? { baseUrl: EXAMPLE_MANIFEST.baseUrl, flows: discovered }
+      : EXAMPLE_MANIFEST;
+    fs.writeFileSync(target, JSON.stringify(manifest, null, 2) + "\n");
+    console.log(`Wrote ${target}` + (discovered.length ? ` (${discovered.length} flow(s) from your routes)` : " (starter example)"));
     console.log(`\nEdit it to describe your real flows, then:`);
     console.log(` npm run cli -- sweep daily --dry-run`);
     return;
@@ -960,6 +948,21 @@ async function cmdSweep(): Promise<void> {
     engine: (arg("engine") as "rhai" | "internal") ?? "internal",
     concurrency: arg("concurrency") ? Number(arg("concurrency")) : undefined,
   });
+
+  // Record the sweep for the dashboard, unless it was only a dry run.
+  if (!flag("dry-run")) {
+    const { Recorder, flushRuns } = await import("./session/recorder.ts");
+    const rec = new Recorder({ kind: "verify", projectId: project.id, trigger: mode === "pr" ? "webhook" : "scheduled" });
+    rec.event("verify", "sweep.plan", `Planned ${result.planned} flow(s)`);
+    for (const c of result.confirmed) {
+      rec.event("verify", "flow.failed", `${c.flow.name}: ${c.results.at(-1)?.summary ?? "failed"}`);
+    }
+    for (const f of result.flakes) rec.event("verify", "flow.flaky", `${f.flow.name} was flaky`);
+    rec.finish(result.confirmed.length > 0 ? "failed" : "succeeded", {
+      failureReason: result.confirmed.length ? `${result.confirmed.length} flow(s) confirmed broken` : undefined,
+    });
+    await flushRuns().catch(() => {});
+  }
 
   // A sweep that only reports is half the product. With --repair, every
   // confirmed break goes straight into the closed loop: change the code,

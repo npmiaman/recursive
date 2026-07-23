@@ -12,6 +12,7 @@ import type { BackendVerification } from "../sweep/backend.ts";
 import type { SweepEngine } from "../sweep/engine.ts";
 import type { Diagnosis } from "./debug.ts";
 import { runClosedLoop, formatClosedLoop, type ClosedLoopResult } from "./closed.ts";
+import { Recorder, flushRuns } from "../session/recorder.ts";
 
 /**
  * Tier 1 repair, the bridge that makes the closed loop executable.
@@ -103,9 +104,42 @@ function failureRecordFor(options: RepairOptions, implicatedFiles: string[]): Fa
   };
 }
 
+/** Coarsely classify a log line into a run stage, for the dashboard timeline. */
+function stageFor(line: string): "retrieve" | "verify" | "ship" | "attempt" {
+  const l = line.toLowerCase();
+  if (l.includes("retriev") || l.includes("memory")) return "retrieve";
+  if (l.includes("verif") || l.includes("flow") || l.includes("broken") || l.includes("passed"))
+    return "verify";
+  if (l.includes("branch") || l.includes("pr:") || l.includes("commit") || l.includes("merge"))
+    return "ship";
+  return "attempt";
+}
+
 export async function repairFlow(options: RepairOptions): Promise<RepairResult> {
-  const log = options.onProgress ?? ((l: string) => console.log(l));
   const repo = new Repo(options.repoPath);
+
+  // Record everything this repair does, for the dashboard. Local-first and
+  // best-effort: the recording never blocks or fails the repair.
+  const recorder = new Recorder({
+    kind: "repair",
+    projectId: options.projectId,
+    trigger: "manual",
+    subject: { signalClass: "flow-failure" },
+    repo: (() => {
+      try {
+        return { branch: repo.currentBranch() };
+      } catch {
+        return undefined;
+      }
+    })(),
+  });
+  const editedFiles = new Set<string>();
+
+  const baseLog = options.onProgress ?? ((l: string) => console.log(l));
+  const log = (line: string): void => {
+    baseLog(line);
+    recorder.event(stageFor(line), "info", line);
+  };
 
   // ---- 1. Find the code ------------------------------------------------
   //
@@ -254,6 +288,7 @@ export async function repairFlow(options: RepairOptions): Promise<RepairResult> 
       // says "done" while changing nothing is a failure mode already seen.
       const filesChanged = repo.dirtyFiles();
       const applied = filesChanged.length > 0;
+      for (const f of filesChanged) editedFiles.add(f);
 
       if (applied && !options.dryRun) {
         repo.commitAll(
@@ -349,6 +384,20 @@ export async function repairFlow(options: RepairOptions): Promise<RepairResult> 
       log(` no git remote, commits are on ${branch}, push manually to open a PR`);
     }
   }
+
+  // Close and upload the run. retrievalHitRank is computed in finish() from the
+  // retrieved vs edited files, which is exactly the signal the Insights page
+  // charts.
+  recorder.finish(loop.resolved ? "succeeded" : "failed", {
+    attemptsTried: loop.cycles.length,
+    attemptsKept: commits.length,
+    retrievedFiles: implicatedFiles,
+    editedFiles: [...editedFiles],
+    branch,
+    prUrl,
+    failureReason: loop.resolved ? undefined : loop.handoff?.reason,
+  });
+  await flushRuns().catch(() => {});
 
   return { flowId: options.flow.id, loop, branch, prUrl, merged, commits };
 }

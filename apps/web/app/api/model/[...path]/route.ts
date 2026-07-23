@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { accountFromAuthHeader } from "@/lib/session";
-import { recordUsage } from "@/lib/db";
+import { recordUsage, countRecentUsage } from "@/lib/db";
 
 /**
  * The shared-key model gateway.
@@ -40,6 +40,20 @@ async function handle(request: Request, path: string[]): Promise<Response> {
       { error: "The dashboard has no model key configured (set MODEL_UPSTREAM_KEY)." },
       { status: 503 },
     );
+  }
+
+  // Per-account fairness. The upstream key has ONE limit shared by everyone
+  // (40 RPM on the free tier), so without this one account could starve the
+  // rest. Cap each account below the shared ceiling; tune with ACCOUNT_RPM.
+  const perAccountRpm = Number(process.env.ACCOUNT_RPM ?? 20);
+  if (perAccountRpm > 0) {
+    const recent = await countRecentUsage(account.id, new Date(Date.now() - 60_000).toISOString());
+    if (recent >= perAccountRpm) {
+      return NextResponse.json(
+        { error: `Rate limit: ${perAccountRpm} requests/min per account on the shared key.` },
+        { status: 429, headers: { "retry-after": "5" } },
+      );
+    }
   }
 
   const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.text();

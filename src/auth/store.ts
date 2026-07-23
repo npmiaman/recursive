@@ -48,7 +48,12 @@ export function loadCredentials(): Credentials | undefined {
       accountId: process.env["RECURSIVE_ACCOUNT_ID"] ?? "env",
       email: "",
       token: envToken,
-      apiUrl: process.env["RECURSIVE_API_URL"] ?? "http://localhost:4400",
+      // `recursive login` writes RECURSIVE_DASHBOARD_URL to the global config;
+      // accept it here so run upload works with no extra setup.
+      apiUrl:
+        process.env["RECURSIVE_API_URL"] ??
+        process.env["RECURSIVE_DASHBOARD_URL"] ??
+        "http://localhost:4400",
       createdAt: new Date().toISOString(),
     };
   }

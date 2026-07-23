@@ -2,6 +2,7 @@ import Link from "next/link";
 import { headers } from "next/headers";
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle, StatTile } from "@/components/ui";
 import { StatusBadge } from "@/components/status-badge";
+import { TerminalList } from "@/components/terminal-list";
 import { formatWhen } from "@/lib/format";
 import { currentAccount } from "@/lib/session";
 import { listRuns, listCliTokens, usageForAccount, isOwner, usageAllAccounts } from "@/lib/db";
@@ -59,16 +60,7 @@ export default async function OverviewPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <ul className="space-y-1.5 text-sm">
-              {terminals.map((t, i) => (
-                <li key={i} className="flex items-center justify-between">
-                  <span>{t.label ?? "terminal"}</span>
-                  <span className="text-muted-foreground">
-                    {t.lastUsedAt ? `active ${formatWhen(t.lastUsedAt)}` : `connected ${formatWhen(t.createdAt)}`}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <TerminalList terminals={terminals} />
           </CardContent>
         </Card>
       ) : (

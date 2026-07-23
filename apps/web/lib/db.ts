@@ -205,17 +205,54 @@ export async function revokeToken(token: string): Promise<void> {
 
 export async function listCliTokens(
   accountId: string,
-): Promise<{ label: string | null; createdAt: string; lastUsedAt: string | null }[]> {
+): Promise<{ id: string; label: string | null; createdAt: string; lastUsedAt: string | null }[]> {
   const rows = await q<Record<string, string | null>>(
-    `SELECT label, created_at, last_used_at FROM sessions
+    `SELECT token_hash, label, created_at, last_used_at FROM sessions
      WHERE account_id = ? AND kind = 'cli' ORDER BY created_at DESC`,
     [accountId],
   );
   return rows.map((row) => ({
+    // The token HASH is a safe public identifier: it names the session for
+    // revocation without being the token itself.
+    id: row["token_hash"]!,
     label: row["label"] ?? null,
     createdAt: row["created_at"]!,
     lastUsedAt: row["last_used_at"] ?? null,
   }));
+}
+
+/** Revoke one CLI session by its id (token hash), scoped to the account. */
+export async function revokeCliSession(accountId: string, id: string): Promise<boolean> {
+  const rows = await q(
+    `DELETE FROM sessions WHERE account_id = ? AND token_hash = ? AND kind = 'cli' RETURNING token_hash`,
+    [accountId, id],
+  );
+  return rows.length > 0;
+}
+
+/** Change an account's password (the account is already authenticated). */
+export async function updatePassword(accountId: string, newPassword: string): Promise<void> {
+  const salt = randomBytes(16).toString("hex");
+  await q(`UPDATE accounts SET password_hash = ?, password_salt = ? WHERE id = ?`, [
+    hashPassword(newPassword, salt),
+    salt,
+    accountId,
+  ]);
+}
+
+/** Calls by this account since a timestamp, for gateway rate limiting. */
+export async function countRecentUsage(accountId: string, sinceIso: string): Promise<number> {
+  const row = await one<Record<string, string>>(
+    `SELECT COUNT(*) c FROM usage WHERE account_id = ? AND at > ?`,
+    [accountId, sinceIso],
+  );
+  return Number(row?.["c"] ?? 0);
+}
+
+/** Trivial query to keep a free-tier database from pausing. */
+export async function health(): Promise<boolean> {
+  const row = await one<Record<string, number>>(`SELECT 1 AS ok`);
+  return row?.["ok"] === 1;
 }
 
 // ------------------------------------------------------------ device flow
