@@ -14,14 +14,17 @@ import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHash } from
  * readable, and the schema is created lazily on first use.
  */
 
+// Accept whatever name the provider injects. Vercel's Neon integration sets
+// DATABASE_URL and POSTGRES_URL; Supabase gives a plain connection string. Any
+// of them works.
+const CONNECTION =
+  process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL;
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: CONNECTION,
   // Managed Postgres (Neon, Supabase) requires TLS; a local Docker Postgres does
   // not. Detect the local case so both work with no config.
-  ssl:
-    process.env.DATABASE_URL && !/localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL)
-      ? { rejectUnauthorized: false }
-      : undefined,
+  ssl: CONNECTION && !/localhost|127\.0\.0\.1/.test(CONNECTION) ? { rejectUnauthorized: false } : undefined,
   max: 5,
 });
 
