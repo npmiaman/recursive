@@ -1,0 +1,30 @@
+{
+  "name": "clarity-autoresearch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Autonomous UX agent: reads Microsoft Clarity, diagnoses friction, hill-climbs fixes against a local proxy scorer, opens PRs, then verifies against real Clarity data.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "cli": "node --experimental-strip-types --no-warnings src/cli.ts",
+    "snapshot": "npm run cli -- snapshot",
+    "diagnose": "npm run cli -- diagnose",
+    "score": "npm run cli -- score",
+    "fix": "npm run cli -- fix",
+    "verify": "npm run cli -- verify"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "@anthropic-ai/sdk": "^0.113.0",
+    "playwright": "^1.49.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}
