@@ -409,7 +409,7 @@ repository: 115 files, 704 chunks.
 | Baseline | 33% | 67% | 67% | 0.486 |
 | Plus stemming | 42% | 67% | 67% | 0.528 |
 | Plus untracked-file fix | 67% | 92% | 92% | 0.790 |
-| Plus base memory | **83%** | **92%** | **100%** | **0.896** |
+| Plus base memory (real model) | **75%** | **92%** | **92%** | **0.833** |
 
 The largest single jump came from a bug, not a feature. `git ls-files` returns
 only *tracked* files, so 45 of 88 source files were invisible to retrieval, and
@@ -417,12 +417,14 @@ invisible *silently*, producing a confidently wrong answer rather than an error.
 That is exactly backwards for a tool that investigates fresh breakage, because
 the code most likely to be at fault is the code somebody just wrote.
 
-**Caveat that matters:** base memory in this benchmark was enriched by a mock
-provider, because the measurement was taken without an API key. The plumbing and
-the vocabulary bridge are real and verified. The quality of genuine model
-summaries is untested, and the 0.3 weight is tuned on 12 queries, which is too
-few to trust a peak. The weight sits at the centre of the flat region of a
-parameter sweep rather than at the argmax for exactly that reason.
+The base-memory row is measured with real model summaries: 108 of 119 files
+enriched by DeepSeek V4-Flash on NVIDIA's free endpoint. An earlier run with a
+hand-written mock provider scored one query higher on recall@1 and one on
+recall@5 (83% / 100%), because the mock's summaries used benchmark-friendly
+vocabulary. On 12 queries that is within noise, and recall@3 is identical at
+92% either way, so the mock was a fair proxy but slightly optimistic. The 0.3
+weight is tuned on 12 queries, too few to trust a peak, so it sits at the centre
+of the flat region of a parameter sweep rather than at the argmax.
 
 `recall@3` is the number that matters in practice, because the fix agent is
 handed roughly 10 chunks. `recall@1` is a stricter bar than the system requires.
@@ -655,9 +657,9 @@ Stated plainly, because a README that only lists strengths is not useful.
   proven end to end, but the CLI does not POST to `/api/runs`. Every run visible
   in a fresh dashboard is seeded. Connecting `repairFlow` and `sweep` to it is
   the next step.
-- **Base memory enrichment quality is unmeasured.** All benchmarks used a mock
-  enrichment provider. The retrieval plumbing is verified, the model output
-  quality is not.
+- **Base memory enrichment is measured on only one model.** DeepSeek V4-Flash
+  (NVIDIA free tier) was used for the real run above. Other models are untested,
+  and enrichment quality on a large unfamiliar codebase is still unknown.
 - **The retrieval benchmark is 12 queries on one repository.** Enough to catch a
   regression, far too few to claim generality.
 - **Tier 2 does not exist and is not planned.** Recursive stops at a pull
