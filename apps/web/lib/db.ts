@@ -88,6 +88,24 @@ const SCHEMA = `
     ok INTEGER NOT NULL DEFAULT 1
   );
   CREATE INDEX IF NOT EXISTS usage_account_at ON usage(account_id, at DESC);
+
+  -- Cross-user learning pool. Each row is a PATTERN and the fix that worked,
+  -- never any code (see the CLI anonymizer). Shared across accounts on purpose:
+  -- that is the flywheel.
+  CREATE TABLE IF NOT EXISTS learnings (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    at TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    signal_class TEXT NOT NULL,
+    route_pattern TEXT NOT NULL,
+    symptom TEXT NOT NULL,
+    approach TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    area TEXT,
+    language TEXT
+  );
+  CREATE INDEX IF NOT EXISTS learnings_fingerprint ON learnings(fingerprint);
 `;
 
 let schemaReady: Promise<unknown> | undefined;
@@ -598,6 +616,65 @@ export async function usageAllAccounts(): Promise<{
     lastUsedAt: row["last"] ? String(row["last"]) : null,
   }));
   return { total: await summarize(null), perAccount };
+}
+
+// ------------------------------------------------------------ learning pool
+
+export interface LearningInput {
+  fingerprint: string;
+  signalClass: string;
+  routePattern: string;
+  symptom: string;
+  approach: string;
+  outcome: string;
+  area?: string;
+  language?: string;
+}
+
+/** Store one anonymized learning (no code, by construction on the CLI side). */
+export async function recordLearning(accountId: string, l: LearningInput): Promise<void> {
+  await q(
+    `INSERT INTO learnings (id, account_id, at, fingerprint, signal_class, route_pattern, symptom, approach, outcome, area, language)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      randomUUID(),
+      accountId,
+      new Date().toISOString(),
+      String(l.fingerprint).slice(0, 64),
+      String(l.signalClass).slice(0, 40),
+      String(l.routePattern).slice(0, 200),
+      String(l.symptom).slice(0, 400),
+      String(l.approach).slice(0, 400),
+      l.outcome === "reverted" ? "reverted" : "worked",
+      l.area ? String(l.area).slice(0, 20) : null,
+      l.language ? String(l.language).slice(0, 20) : null,
+    ],
+  );
+}
+
+/**
+ * Approaches that worked for a fingerprint, ACROSS ALL ACCOUNTS.
+ *
+ * No account filter is the whole point: this is where one team's fix reaches
+ * another. Grouped by approach so a repeatedly-successful fix ranks first.
+ */
+export async function searchLearnings(
+  fingerprint: string,
+): Promise<{ approach: string; symptom: string; outcome: string; count: number }[]> {
+  const rows = await q<Record<string, string | number>>(
+    `SELECT approach, MIN(symptom) AS symptom, outcome, COUNT(*) AS c
+     FROM learnings
+     WHERE fingerprint = ? AND outcome = 'worked'
+     GROUP BY approach, outcome
+     ORDER BY c DESC LIMIT 10`,
+    [fingerprint],
+  );
+  return rows.map((r) => ({
+    approach: String(r["approach"]),
+    symptom: String(r["symptom"]),
+    outcome: String(r["outcome"]),
+    count: Number(r["c"]),
+  }));
 }
 
 /** The owner is the first account created, i.e. whoever set up this dashboard. */

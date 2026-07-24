@@ -31,8 +31,9 @@
     "test:browse": "node --experimental-strip-types --no-warnings test/browse.test.ts",
     "eval:retrieve": "node --experimental-strip-types --no-warnings test/retrieve-eval.ts",
     "test:loop": "node --experimental-strip-types --no-warnings test/closed-loop.test.ts",
-    "test:all": "npm run test && npm run test:loop",
-    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"apps/web/**/*.{ts,tsx}\""
+    "test:all": "npm run test && npm run test:loop && npm run test:backend",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"apps/web/**/*.{ts,tsx}\"",
+    "test:backend": "node --experimental-strip-types --no-warnings test/backend-verify.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",

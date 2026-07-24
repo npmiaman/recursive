@@ -1,0 +1,7 @@
+{
+  "name": "@recursive/server-sdk",
+  "version": "0.1.0",
+  "description": "Drop-in middleware that exposes a backend trace endpoint Recursive reads to verify what the server actually did.",
+  "type": "commonjs",
+  "main": "recursive-server.js"
+}

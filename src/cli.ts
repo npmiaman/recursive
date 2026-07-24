@@ -100,6 +100,7 @@ MEMORY, permanent, per-project, never deleted
                         --full re-index everything, not just changed files
  memory              What this project has learned: counts, lessons, hit rate.
  memory search "..." Find past failures similar to a description.
+ export              Dump this project's memory as a JSONL training dataset (--out FILE).
 
 CODEBASE
  retrieve            Find the code relevant to a failure. Shows how it decided.
@@ -840,6 +841,60 @@ ${appEnv || "          # add your app's env vars here, from this repo's Actions 
   console.log(`\n  Then: commit the workflow, and it runs nightly + on demand from the Actions tab.\n`);
 }
 
+/**
+ * `recursive export`, dump this project's memory as a training dataset.
+ *
+ * The point of never deleting memory is that it accumulates into something you
+ * can learn FROM. This turns it into JSONL, one example per failure: the
+ * symptom, every attempt with its reasoning and whether it was kept, and the
+ * final resolution. That is exactly the shape a fine-tune or an eval set wants.
+ *
+ * This is your data, on your machine, so it is exported whole, not anonymized.
+ * (The cross-user pool is the anonymized path; this is the local one.)
+ */
+async function cmdExport(): Promise<void> {
+  const fs = await import("node:fs");
+  const { allRecords, attemptsFor, outcomeFor } = await import("./memory/store.ts");
+  const project = resolveProject(arg("project"));
+
+  const records = allRecords(project.id);
+  const failures = records.filter((r) => r.type === "failure");
+
+  const lines: string[] = [];
+  for (const f of failures as Array<{ id: string; signalClass: string; route: string; message: string; implicatedFiles?: string[]; at: string }>) {
+    const attempts = attemptsFor(project.id, f.id);
+    const outcome = outcomeFor(project.id, f.id);
+    lines.push(
+      JSON.stringify({
+        failure: {
+          signalClass: f.signalClass,
+          route: f.route,
+          symptom: f.message,
+          implicatedFiles: f.implicatedFiles ?? [],
+          at: f.at,
+        },
+        attempts: attempts.map((a) => ({
+          approach: a.approach,
+          reasoning: a.rationale,
+          filesChanged: a.filesChanged,
+          outcome: a.outcome,
+          whyItFailed: a.whyItFailed,
+        })),
+        resolved: outcome?.verdict ?? "unknown",
+      }),
+    );
+  }
+
+  const out = arg("out");
+  if (out) {
+    fs.writeFileSync(out, lines.join("\n") + (lines.length ? "\n" : ""));
+    console.error(`Wrote ${lines.length} example(s) to ${out}`);
+  } else {
+    process.stdout.write(lines.join("\n") + (lines.length ? "\n" : ""));
+    console.error(`\n${lines.length} training example(s) from project '${project.id}'.`);
+  }
+}
+
 async function cmdStatus(): Promise<void> {
   const b = budget.state();
   console.log(`\nClarity API budget   ${b.remaining}/${b.limit} remaining today (${b.date} UTC)`);
@@ -1526,6 +1581,9 @@ async function main(): Promise<void> {
       break;
     case "ci":
       await cmdCi();
+      break;
+    case "export":
+      await cmdExport();
       break;
     case "doctor":
       await cmdDoctor();

@@ -293,6 +293,15 @@ export function recordById(projectId: string, id: string): MemoryRecord | undefi
   return row ? parse<MemoryRecord>(row) : undefined;
 }
 
+/** Every record for a project, oldest first. The basis of `recursive export`. */
+export function allRecords(projectId: string): MemoryRecord[] {
+  return open(projectId)
+    .prepare(`SELECT payload FROM records ORDER BY rowid ASC`)
+    .all()
+    .map((row) => parse<MemoryRecord>(row))
+    .filter((r): r is MemoryRecord => r !== undefined);
+}
+
 export interface MemoryStats {
   changes: number;
   failures: number;

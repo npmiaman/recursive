@@ -13,6 +13,8 @@ import type { SweepEngine } from "../sweep/engine.ts";
 import type { Diagnosis } from "./debug.ts";
 import { runClosedLoop, formatClosedLoop, type ClosedLoopResult } from "./closed.ts";
 import { Recorder, flushRuns } from "../session/recorder.ts";
+import { anonymizeLearning } from "../learn/anonymize.ts";
+import { uploadLearning, searchLearnings, renderPooledLearnings } from "../learn/pool.ts";
 
 /**
  * Tier 1 repair, the bridge that makes the closed loop executable.
@@ -188,6 +190,34 @@ export async function repairFlow(options: RepairOptions): Promise<RepairResult> 
     }
   } catch {
     /* memory not initialised for this project */
+  }
+
+  // ---- 2b. Ask the cross-user pool what worked ELSEWHERE ---------------
+  //
+  // Local memory only knows what THIS project has seen. The pool knows what
+  // every team using Recursive fixed for the same pattern, so a failure this
+  // repo has never hit can still arrive with a proven approach attached. What
+  // travels is a pattern, never code (see src/learn/anonymize.ts).
+  const pattern = anonymizeLearning({
+    signalClass: failure.signalClass,
+    route: failure.route,
+    symptom: failure.message,
+    approach: "",
+    outcome: "worked",
+  });
+  try {
+    const pooled = await searchLearnings({
+      fingerprint: pattern.fingerprint,
+      signalClass: pattern.signalClass,
+      routePattern: pattern.routePattern,
+    });
+    const rendered = renderPooledLearnings(pooled);
+    if (rendered) {
+      memory = `${rendered}\n${memory ?? ""}`;
+      log(`  pool: ${pooled.length} approach(es) that worked for this pattern elsewhere`);
+    }
+  } catch {
+    /* offline or not logged in; the pool simply does not contribute */
   }
 
   append(failure);
@@ -397,6 +427,21 @@ export async function repairFlow(options: RepairOptions): Promise<RepairResult> 
     prUrl,
     failureReason: loop.resolved ? undefined : loop.handoff?.reason,
   });
+
+  // Contribute back to the pool: a verified fix becomes a learning the next
+  // team inherits. Only on success, and only the pattern + approach, never code.
+  if (loop.resolved) {
+    const winningApproach = loop.cycles.at(-1)?.action ?? "Repaired the flow.";
+    await uploadLearning(
+      anonymizeLearning({
+        signalClass: failure.signalClass,
+        route: failure.route,
+        symptom: failure.message,
+        approach: winningApproach,
+        outcome: "worked",
+      }),
+    ).catch(() => {});
+  }
   await flushRuns().catch(() => {});
 
   return { flowId: options.flow.id, loop, branch, prUrl, merged, commits };
