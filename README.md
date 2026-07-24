@@ -1,15 +1,39 @@
 # Recursive
 
-**Software that finds its own breakage, contains it, and opens a verified fix.**
+> **Software that finds its own breakage, contains it, and opens a verified fix — from your terminal, or in the cloud while you keep working.**
 
-Recursive installs into a repository, learns what the codebase does, watches
-production for failures (including the silent ones that throw no exception), and
-repairs them by writing code and re-testing the real user journey until it
-genuinely passes.
+![Node ≥ 22.6](https://img.shields.io/badge/node-%E2%89%A5%2022.6-3c873a)
+![TypeScript, no build step](https://img.shields.io/badge/TypeScript-no%20build%20step-3178c6)
+![Runs in your terminal](https://img.shields.io/badge/runs%20in-your%20terminal-111111)
+![Cloud: GitHub Actions](https://img.shields.io/badge/cloud-GitHub%20Actions-24292f)
+![Verified against reality](https://img.shields.io/badge/fixes-verified%20against%20reality-6f42c1)
 
-It is not a linter and not a monitoring dashboard. It is a closed loop: detect,
-diagnose, change the code, verify against reality, and try again if the change
-did not work.
+Recursive installs into a repository, learns what the codebase does, watches for
+failures (including the silent ones that throw no exception), and repairs them by
+writing code and re-testing the **real user journey** until it genuinely passes —
+then opens a pull request.
+
+It is not a linter and not a monitoring dashboard. It is a **closed loop**:
+detect → diagnose → change the code → verify against reality → try again if the
+change did not work. It runs from your terminal, can run in the **cloud** on
+GitHub's servers while you keep working, and **streams live** so you can see it's
+genuinely Recursive's agent doing the work — not some IDE assistant.
+
+```mermaid
+flowchart TD
+    A["📇 INDEX<br/>read every file, learn what it is for"] --> B["🔎 DETECT<br/>sweep real journeys in a browser<br/>+ check the backend behind them"]
+    B --> C["🧩 CORRELATE<br/>which deploy? which cohort?<br/>novel, or seen before?"]
+    C --> D["🛡️ CONTAIN · Tier 0<br/>flip the flag, no deploy<br/>seconds, reversible"]
+    D --> E["🧭 RETRIEVE<br/>find the code that matters<br/>six signals fused"]
+    E --> F["🛠️ REPAIR · Tier 1<br/>write fix → re-run journey → check server"]
+    F --> G{"UI + postconditions<br/>+ server all agree?"}
+    G -- "no" --> F
+    G -- "yes" --> H["✅ PULL REQUEST<br/>a human reviews & merges"]
+    F -.writes.-> M[("🧠 MEMORY<br/>append-only, never deleted")]
+    H -.contributes.-> P[("🌐 LEARNING POOL<br/>patterns across teams")]
+    M -.recalls.-> E
+    P -.hints.-> F
+```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the deeper design and trust model.
 
@@ -24,17 +48,21 @@ npm run cli -- demo        # seeds a real scenario and runs detect then contain
 
 1. [The problem](#the-problem)
 2. [How it works end to end](#how-it-works-end-to-end)
-3. [Quick start](#quick-start)
-4. [The three tiers](#the-three-tiers)
-5. [Components in detail](#components-in-detail)
-6. [Measured results](#measured-results)
-7. [CLI reference](#cli-reference)
-8. [Web dashboard](#web-dashboard)
-9. [Configuration](#configuration)
-10. [Security and privacy](#security-and-privacy)
-11. [Testing](#testing)
-12. [Limitations and what is not done](#limitations-and-what-is-not-done)
-13. [Repository layout](#repository-layout)
+3. [Architecture at a glance](#architecture-at-a-glance)
+4. [Install it into your project](#install-it-into-your-project)
+5. [The three tiers](#the-three-tiers)
+6. [Cloud runs and live streaming](#cloud-runs-and-live-streaming)
+7. [Accounts and the shared model key](#accounts-and-the-shared-model-key)
+8. [The learning flywheel](#the-learning-flywheel)
+9. [Components in detail](#components-in-detail)
+10. [Measured results](#measured-results)
+11. [CLI reference](#cli-reference)
+12. [Web dashboard](#web-dashboard)
+13. [Configuration](#configuration)
+14. [Security and privacy](#security-and-privacy)
+15. [Testing](#testing)
+16. [Limitations and what is not done](#limitations-and-what-is-not-done)
+17. [Repository layout](#repository-layout)
 
 ---
 
@@ -75,53 +103,80 @@ Three things make the silent case tractable:
 
 ## How it works end to end
 
-```
-  ┌─────────────┐
-  │   INDEX     │  Read every file once. Learn what each one is FOR,
-  │ base memory │  what depends on it, and what breaks if it is wrong.
-  └──────┬──────┘
-         │
-  ┌──────▼──────┐
-  │   DETECT    │  Clarity signals, browsing-agent sweeps,
-  │             │  SDK-reported errors, backend traces.
-  └──────┬──────┘
-         │
-  ┌──────▼──────┐
-  │  CORRELATE  │  Which deploy caused this? Which cohort is hit?
-  │             │  Is this novel, or has it happened before?
-  └──────┬──────┘
-         │
-  ┌──────▼──────┐
-  │  TIER 0     │  Contain it now, without a deploy. Turn the flag off.
-  │  CONTAIN    │  Guardrails decide whether this is allowed at all.
-  └──────┬──────┘
-         │
-  ┌──────▼──────┐
-  │  RETRIEVE   │  Find the code that matters. Six signals fused:
-  │             │  stack, symbols, git, base memory, BM25, import graph.
-  └──────┬──────┘
-         │
-  ┌──────▼──────┐
-  │  TIER 1     │  Write a fix. Re-run the REAL user journey in a real
-  │  REPAIR     │  browser. Check the server. If it still fails, debug
-  │ closed loop │  and try again. Stop when verified or honestly stuck.
-  └──────┬──────┘
-         │
-  ┌──────▼──────┐
-  │  PULL       │  A human reviews and merges. Recursive never deploys.
-  │  REQUEST    │
-  └──────┬──────┘
-         │
-  ┌──────▼──────┐
-  │  REMEMBER   │  Every failure, every attempt including the failures,
-  │  forever    │  and all the reasoning. Never deleted.
-  └─────────────┘
+The top-of-page diagram shows the whole pipeline. The loop that matters most is
+**Tier 1 repair**, because it is where "self-healing" stops being a slogan and
+becomes a checkable claim. A fix is not "done" because an agent said so. It is
+done only when the user journey has been driven again in a real browser, the
+business postconditions hold, and the server shows no errors — **all three must
+agree**:
+
+```mermaid
+sequenceDiagram
+    participant L as Repair loop
+    participant D as Debugger (model)
+    participant FS as Your code
+    participant B as Real browser
+    participant SRV as Your server
+
+    L->>B: drive the real user journey
+    B-->>L: ❌ flow fails (or UI "passes")
+    L->>D: what's wrong? why did the last theory fail?
+    D-->>L: hypothesis + approach (+ whyPreviousAttemptFailed)
+    L->>FS: edit real files (git is ground truth)
+    L->>B: re-drive the journey
+    L->>SRV: check postconditions + any 5xx / unhandled
+    alt UI ✓ AND postconditions ✓ AND server clean
+        L->>FS: keep the change → open a pull request ✅
+    else any judge disagrees
+        L->>D: debug, revise the hypothesis, try again 🔁
+    end
+    note over L,SRV: stops when verified — or honestly hands off if stuck
 ```
 
-The loop that matters most is Tier 1. A fix is not "done" because an agent said
-so. It is done when the user journey has been driven again in a real browser,
-the business postconditions hold, and the server shows no errors. All three must
-agree.
+The three judges are deliberately independent: a browser that says "Order
+confirmed" is not proof an order exists, so Recursive also checks the count moved
+*and* that the backend didn't 500 behind the green screen.
+
+---
+
+## Architecture at a glance
+
+Two halves. Your machine (or CI) runs the loop and edits code; a hosted dashboard
+holds the shared model key and the cross-team memory. **Your app's secrets never
+leave your side, and your code never enters our database** — only anonymized
+patterns do.
+
+```mermaid
+flowchart LR
+    subgraph HOST["🖥️ Your machine / CI"]
+      direction TB
+      CLI["recursive CLI<br/>runs journeys · edits code · verifies"]
+      SEC[["🔒 your app secrets<br/>stay here / in your repo's<br/>Actions secrets — never in our DB"]]
+      MEM[("🧠 local memory<br/>.recursive/ · never deleted")]
+      CLI --- SEC
+      CLI --- MEM
+    end
+
+    subgraph CLOUD["☁️ Recursive dashboard · Vercel + Supabase"]
+      direction TB
+      GW["🔑 shared-key model gateway<br/>one key, server-side only<br/>meters usage per account"]
+      RUNS[("runs + live events")]
+      POOL[("🌐 anonymized learning pool")]
+    end
+
+    MODEL[["🧠 LLM<br/>DeepSeek-v4 (free) / Claude (launch)"]]
+
+    CLI -- "account token<br/>(never the key)" --> GW
+    GW -- "real key, held only here" --> MODEL
+    CLI -- "live events" --> RUNS
+    RUNS -- "recursive watch" --> CLI
+    CLI -- "patterns only,<br/>never code" --> POOL
+    POOL -. "what worked elsewhere" .-> CLI
+```
+
+Everything runs by executing TypeScript directly — **no build step** — so the CLI
+is `node --experimental-strip-types src/cli.ts` under the hood, and installs into
+any repo without a compile.
 
 ---
 
@@ -225,6 +280,113 @@ auditable by construction:
   containment would be a guess.
 
 Every decision, allowed or blocked, is written to an append-only audit log.
+
+---
+
+## Cloud runs and live streaming
+
+Recursive is terminal-native, but it doesn't need your laptop open. A run can
+execute on GitHub's servers while you keep working, and stream back to any
+terminal so you can watch it happen.
+
+```mermaid
+sequenceDiagram
+    participant You as You (terminal)
+    participant GH as GitHub Actions
+    participant R as Recursive (cloud runner)
+    participant DB as Dashboard
+
+    You->>GH: recursive cloud  (dispatch workflow)
+    Note over You: safe to close the lid 💤
+    GH->>R: spin up runner, start your app
+    loop as it works
+        R->>DB: push events live (sweep, diagnose, edit, verify)
+    end
+    You->>DB: recursive watch  (poll ?since=)
+    DB-->>You: stream events into your terminal, live
+    R->>DB: run resolved ✅ → PR opened
+    DB-->>You: terminal status appears
+```
+
+| Command | What it does |
+|---|---|
+| `recursive cloud` | Dispatch a sweep + repair onto GitHub Actions and stream it here. Needs `recursive ci` committed once, and `gh` (or `GITHUB_TOKEN`). |
+| `recursive watch [runId]` | Follow a run live in this terminal. No id = your latest run. Ctrl-C detaches; the run keeps going. |
+| `recursive sweep --detach` | Run locally in the background and hand your shell back. Follow with `watch`. |
+| `recursive ci` | Write the `.github/workflows/recursive.yml` that runs Recursive in the cloud on a schedule + on demand. |
+
+Live streaming is **best-effort and never blocks the fix loop** — every event is
+written to disk first and mirrored to the dashboard, so a network blip degrades
+the live view, never the run. GitHub Actions runs turn streaming on
+automatically; locally it's on for `cloud` / `watch` / `--detach`.
+
+---
+
+## Accounts and the shared model key
+
+You sign up once on the dashboard, then `recursive login` connects **any**
+terminal — your laptop, a teammate's, a CI runner — to that same account, using a
+device-code flow like `gh auth login` (the CLI never sees a password).
+
+The account is also how the **shared model key** works. Instead of every
+developer pasting a model key into every project, the key lives in exactly one
+place — the dashboard's gateway, server-side — and each terminal authenticates
+with its **account token**. The gateway forwards the request to the model with
+the real key and records exactly how much that account used.
+
+```mermaid
+flowchart LR
+    T1["terminal · dev A"] -- account token --> GW["🔑 gateway<br/>holds the ONE key"]
+    T2["terminal · dev B"] -- account token --> GW
+    T3["CI runner"] -- account token --> GW
+    GW -- real key --> M[["🧠 model"]]
+    GW -- "meter tokens<br/>per account" --> U[("usage ledger")]
+```
+
+- **One key, no spread.** Nobody but the server holds it; rotating it is one env
+  change, and no developer machine has to be touched.
+- **Per-account metering + rate limits.** The dashboard shows precisely which
+  account used how much, and caps requests per account so one runner can't starve
+  the rest.
+- **Invite-only signup, revocable terminals.** New accounts need the owner's
+  signup code; any connected terminal can be revoked server-side, killing a
+  captured token everywhere at once.
+
+---
+
+## The learning flywheel
+
+Recursive gets better as more people use it, without any code leaving a machine.
+
+When a fix is **verified**, Recursive contributes a *pattern* to a shared pool:
+a fingerprint of the failure (its signal class + the shape of the route, e.g.
+`/orders/12345` → `/orders/:id`), a scrubbed one-line symptom, and the approach
+that worked. Before diagnosing a new failure, it asks the pool *"what worked for
+this pattern elsewhere?"* and leads the fix agent with the answer.
+
+```mermaid
+flowchart LR
+    subgraph A["Team A"]
+      FA["verified fix<br/>on /checkout"]
+    end
+    FA -- "fingerprint + scrubbed symptom<br/>+ approach — NEVER code" --> POOL[("🌐 learning pool")]
+    subgraph B["Team B (different repo, different words)"]
+      FB["new failure<br/>same pattern"]
+    end
+    POOL -- "3 teams fixed this by X" --> FB
+```
+
+**What travels, and what never does:**
+
+| Leaves the machine | Never leaves the machine |
+|---|---|
+| Failure fingerprint (signal + route shape) | Your code |
+| Scrubbed, truncated one-line symptom | File names, repo names |
+| The approach that worked | Stack traces, secrets, PII |
+
+Opt out entirely with `RECURSIVE_NO_SHARE=1`. And `recursive export` dumps your
+*own* project's full memory as JSONL — un-anonymized, local, whole — a ready-made
+fine-tuning / eval dataset of your own history.
 
 ---
 
@@ -507,6 +669,7 @@ npm run cli -- <command>
 | `sweep pr --base REF` | Test only the flows a diff put at risk. Gates a merge |
 | `sweep daily --max N` | Test every core flow plus the highest-risk remainder |
 | `sweep --repair` | Fix what breaks instead of only reporting it |
+| `sweep --detach` | Run in the background; keep working, follow with `watch` |
 | `sweep --dry-run` | Show the plan without running |
 | `sweep --watch` | Show the browser instead of running headless |
 | `sweep --engine E` | `internal` (fast, default) or `rhai` |
@@ -533,6 +696,19 @@ npm run cli -- <command>
 | `containment` | Did the containment actually work? |
 | `audit` | The full decision trail, including blocked actions |
 
+### Cloud, accounts, and setup
+
+| Command | What it does |
+|---|---|
+| `init` | Set up Recursive in the current project (run this first) |
+| `login [url]` | Connect this terminal to your dashboard account (shared key, no key stored locally) |
+| `config nvidia <key>` | Set a free NVIDIA model key, once, for every project |
+| `doctor` | Verify every subsystem works against this codebase, with a real model call |
+| `ci` | Write the GitHub Actions workflow that runs Recursive in the cloud |
+| `cloud` | Dispatch a cloud run on GitHub and stream it here |
+| `watch [runId]` | Follow a run live in this terminal (no id = latest) |
+| `export --out FILE` | Dump this project's memory as a JSONL training dataset |
+
 ### Other
 
 | Command | What it does |
@@ -554,14 +730,25 @@ npm install
 npm run dev        # http://localhost:4400
 ```
 
+In production it runs on **Vercel** with a **Supabase Postgres** database.
+
 Pages:
 
 - `/` landing page
-- `/signup` and `/login`
+- `/signup` (invite-only) and `/login`
 - `/device` terminal approval for `recursive login`
-- `/dashboard` every run, newest first
-- `/dashboard/runs/[id]` one run in full, with the complete timeline
+- `/dashboard` connection state, live usage vs your rate limit, and (for the
+  owner) a team-usage table of which account used how much
+- `/dashboard/runs/[id]` one run in full, with the complete timeline, streamed
+  **live** while it's still running
 - `/dashboard/insights` is Recursive actually working
+- `/dashboard/settings` connected terminals (revoke any), change password
+
+Behind the pages sit the API routes the CLI talks to: the **model gateway**
+(`/api/model/*`, shared key + per-account metering + rate limit), **runs**
+(`/api/runs` for ingest and live append, `/api/runs/:id` for the live poll the
+`watch` command reads), the **learning pool** (`/api/learnings` + `/search`), and
+the **device-code** auth endpoints.
 
 The run detail page is the important one. When Recursive claims it fixed
 something, that page has to be enough to check the claim without trusting it:
@@ -645,6 +832,18 @@ system unreviewable.
 and live session tokens. Passwords use scrypt with per-account salts and
 constant-time comparison. Session tokens are stored hashed.
 
+**Your app's secrets stay on your side.** When Recursive runs in CI it reads only
+the *names* of the env vars your app declares (to wire them as GitHub Actions
+secrets), never the values, and never stores them in our database. The one shared
+secret — the model key — lives only in the gateway's server-side env and never
+touches a developer machine.
+
+**The learning pool is pattern-only by construction.** What can leave a machine
+is a failure fingerprint, a scrubbed one-line symptom, and the approach that
+worked. Code, file names, repo names, stack traces, and anything the scrubber
+recognises as secret or PII never enter it. `RECURSIVE_NO_SHARE=1` opts out
+entirely.
+
 ---
 
 ## Testing
@@ -677,22 +876,33 @@ motivates the whole project.
 
 Stated plainly, because a README that only lists strengths is not useful.
 
-- **Nothing writes runs to the dashboard yet.** The API, storage and pages are
-  proven end to end, but the CLI does not POST to `/api/runs`. Every run visible
-  in a fresh dashboard is seeded. Connecting `repairFlow` and `sweep` to it is
-  the next step.
+- **It only tests journeys it knows about.** Coverage is your `recursive.flows.json`
+  plus routes it can auto-discover. A broken flow nobody described won't be swept.
+- **It's built for web apps.** Browser-driven sweeps, Next/Vite detection. Not
+  mobile apps, and not purely backend services (though the backend-verify check
+  helps on the API side).
+- **The app has to boot.** In the cloud it starts your app with your secrets; if
+  it can't start, there's nothing to sweep.
+- **Repair quality tracks the model, and it will hand off.** Deep architectural
+  bugs or fixes needing product/design judgment are handed to a human rather than
+  guessed at — a confident wrong fix is worse than an honest "I'm stuck".
+- **A human still owns the merge** unless you explicitly enable `--auto-merge`.
+  It is not a substitute for review on risky changes. **Tier 2 (auto-deploy) does
+  not exist and is not planned.**
+- **Cloud means GitHub Actions.** It needs a GitHub repo with Actions enabled;
+  it is not a bespoke always-on cloud. Detection-only sweeps (no `--repair`) do
+  not create a streamable run.
+- **The free testing model is rate-limited** (NVIDIA, 40 RPM) — fine for trials,
+  not production throughput until a paid key is wired (a one-command swap).
 - **Base memory enrichment is measured on only one model.** DeepSeek V4-Flash
   (NVIDIA free tier) was used for the real run above. Other models are untested,
   and enrichment quality on a large unfamiliar codebase is still unknown.
 - **The retrieval benchmark is 12 queries on one repository.** Enough to catch a
-  regression, far too few to claim generality.
-- **Tier 2 does not exist and is not planned.** Recursive stops at a pull
-  request.
-- **The retrieval benchmark file is excluded from its own results**, because it
-  contains every query verbatim and would otherwise rank top for all of them.
+  regression, far too few to claim generality. The benchmark file is excluded
+  from its own results (it contains every query verbatim).
 - **Cohort analysis needs volume.** At low traffic the sample-size gate will
-  correctly refuse to report anything, which is right but can look like the
-  feature is broken.
+  correctly refuse to report anything — right, but can look like the feature is
+  broken.
 - **Not yet run against a large production codebase.**
 
 ---
@@ -714,9 +924,12 @@ src/
   heal/         Tier 0 containment and guardrails
   llm/          Provider abstraction (Anthropic, any OpenAI-compatible)
   score/        Headless probes and instrumentation
+  session/      Run recorder + live streaming to the dashboard
+  learn/        Cross-team pool: anonymize (patterns only) + upload/search
+  auth/         Device-code login, credential storage
 
-apps/web/       Next.js dashboard
-packages/       Browser SDK and server SDK
+apps/web/       Next.js dashboard (Vercel + Supabase in prod)
+packages/       Browser SDK and server SDK (backend-verify trace endpoint)
 test/           Regression suites and the retrieval benchmark
 fixtures/       Static pages for browsing-agent tests
 docs/           Additional notes
