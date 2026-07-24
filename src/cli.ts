@@ -77,6 +77,7 @@ REPAIR. Tier 1: change the code until the flow actually passes
                         config nvidia <key>        free NVIDIA (40 RPM), for testing
                         config anthropic <key>     paid Claude, for launch
  init                Set up Recursive in the current project (run this first).
+ ci                  Run Recursive in the cloud (GitHub Actions), no laptop needed.
  doctor              Check every subsystem works against a codebase.
                         --repo PATH       codebase to check
  repair FLOW_ID      Fix a failing flow, verifying after every change by
@@ -713,6 +714,130 @@ async function cmdInit(): Promise<void> {
   console.log(`  3. recursive memory index   # learn this codebase`);
   console.log(`  4. recursive sweep daily    # test it in a browser`);
   console.log(`  5. recursive sweep daily --repair   # and fix what breaks\n`);
+}
+
+/**
+ * `recursive ci`, run Recursive in the cloud instead of on a laptop.
+ *
+ * Generates a GitHub Actions workflow that runs a sweep + repair on a schedule
+ * (and on demand), on GitHub's servers. This answers three things at once:
+ *
+ *   - Cloud, laptop closed: it runs on GitHub, not your machine.
+ *   - Secrets stay safe: the app's secrets come from the repo's OWN GitHub
+ *     Actions secrets, never from Recursive's database. Recursive only carries a
+ *     token for the shared model, which meters to your account.
+ *   - Clearly Recursive: the workflow log is `recursive sweep --repair` doing
+ *     the work, its own agent, not an IDE assistant.
+ *
+ * It is a strong starting template, not magic: the one thing that varies per app
+ * is how to start it and which env vars it needs, which is filled from what we
+ * can detect and listed for you to complete.
+ */
+async function cmdCi(): Promise<void> {
+  const fs = await import("node:fs");
+  const repoPath = arg("repo") ?? process.cwd();
+
+  let pkg: { scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> } = {};
+  try {
+    pkg = JSON.parse(fs.readFileSync(resolve(repoPath, "package.json"), "utf8"));
+  } catch {
+    /* not a node app; fall through with generic defaults */
+  }
+  const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+  const isNext = !!deps["next"];
+  const isVite = !!deps["vite"];
+  const port = isNext ? 3000 : isVite ? 5173 : 3000;
+  const buildCmd = pkg.scripts?.["build"] ? "npm run build" : "echo 'no build step'";
+  const startCmd = pkg.scripts?.["start"]
+    ? "npm run start"
+    : pkg.scripts?.["dev"]
+      ? "npm run dev"
+      : "echo 'set your app start command' && sleep infinity";
+
+  // Env var names the app declares (from .env / .env.example), so we can wire
+  // them as GitHub secrets, WITHOUT ever reading their values.
+  const envNames = new Set<string>();
+  for (const f of [".env", ".env.example", ".env.local.example"]) {
+    try {
+      for (const line of fs.readFileSync(resolve(repoPath, f), "utf8").split("\n")) {
+        const m = /^([A-Z][A-Z0-9_]*)=/.exec(line.trim());
+        if (m && !/^(RECURSIVE_|OPENAI_|LLM_|FIX_ENGINE)/.test(m[1]!)) envNames.add(m[1]!);
+      }
+    } catch {
+      /* file absent */
+    }
+  }
+  const appEnv = [...envNames]
+    .slice(0, 40)
+    .map((n) => `          ${n}: \${{ secrets.${n} }}`)
+    .join("\n");
+
+  const dashboard = process.env["RECURSIVE_DASHBOARD_URL"] ?? "https://recursive-dashboard.vercel.app";
+  const workflow = `# Recursive, running in the cloud on GitHub's servers.
+# It sweeps your app in a real browser and opens a PR for anything it fixes.
+# No laptop needed. Your app's secrets stay in THIS repo's Actions secrets.
+name: Recursive
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily; adjust as you like
+  workflow_dispatch: {}    # or run it on demand from the Actions tab
+permissions:
+  contents: write          # push the repair branch
+  pull-requests: write     # open the PR
+jobs:
+  recursive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Recursive reads git history
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the app
+        run: npm ci || npm install
+      - name: Install Recursive
+        run: |
+          npm install -g github:npmiaman/recursive
+          npx playwright install --with-deps chromium
+      - name: Start the app
+        run: |
+          ${buildCmd}
+          ${startCmd} &
+          npx --yes wait-on -t 120000 http://localhost:${port}
+        env:
+${appEnv || "          # add your app's env vars here, from this repo's Actions secrets"}
+      - name: Recursive sweep + repair
+        run: recursive sweep daily --repair
+        env:
+          # From \`recursive login\` on your machine once; add it as a repo secret.
+          RECURSIVE_TOKEN: \${{ secrets.RECURSIVE_TOKEN }}
+          RECURSIVE_DASHBOARD_URL: ${dashboard}
+          # Lets Recursive open the PR.
+          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+`;
+
+  const dir = resolve(repoPath, ".github", "workflows");
+  fs.mkdirSync(dir, { recursive: true });
+  const target = resolve(dir, "recursive.yml");
+  if (fs.existsSync(target) && !flag("force")) {
+    console.error(`${target} already exists. Pass --force to overwrite.`);
+    process.exit(1);
+  }
+  fs.writeFileSync(target, workflow);
+
+  console.log(`\n  ✓ wrote .github/workflows/recursive.yml (${isNext ? "Next.js" : isVite ? "Vite" : "generic"} detected)\n`);
+  console.log(`  Recursive will now run in the cloud on GitHub, no laptop required.\n`);
+  console.log(`  Add two kinds of repo secrets (Settings -> Secrets -> Actions):`);
+  console.log(`    1. RECURSIVE_TOKEN   run \`recursive login\` locally, copy the token it stores`);
+  if (envNames.size) {
+    console.log(`    2. your app's secrets, so the app can start in CI:`);
+    for (const n of [...envNames].slice(0, 12)) console.log(`         ${n}`);
+    if (envNames.size > 12) console.log(`         ... and ${envNames.size - 12} more`);
+  } else {
+    console.log(`    2. any secrets your app needs to start (none detected from .env)`);
+  }
+  console.log(`\n  Then: commit the workflow, and it runs nightly + on demand from the Actions tab.\n`);
 }
 
 async function cmdStatus(): Promise<void> {
@@ -1398,6 +1523,9 @@ async function main(): Promise<void> {
       break;
     case "init":
       await cmdInit();
+      break;
+    case "ci":
+      await cmdCi();
       break;
     case "doctor":
       await cmdDoctor();
