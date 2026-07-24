@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
+import { execSync } from "node:child_process";
 import { config } from "./config.ts";
 import { fetchInsights } from "./clarity/client.ts";
 import type { Dimension } from "./clarity/types.ts";
@@ -30,6 +31,7 @@ import { allLessons } from "./memory/recall.ts";
 import { EXAMPLE_MANIFEST, loadFlows, discoverFlows } from "./sweep/flows.ts";
 import { repairFlow } from "./loop/repair.ts";
 import { seedScenario, DEMO_PROJECT_ID } from "./demo.ts";
+import { loadCredentials } from "./auth/store.ts";
 
 const HELP = `
 Recursive, detect breakage (including the silent kind), contain it, repair it.
@@ -70,6 +72,14 @@ SWEEP, browsing-agent regression runs (rhai)
                         --engine E        'internal' (fast, default) or 'rhai'
                         --concurrency N flows at once (default 3)
                         --repair fix what breaks, don't just report it
+                        --detach run in the background; keep working, then 'watch'
+
+CLOUD, run on servers, not your laptop; stream to any terminal
+ cloud               Dispatch a sweep+repair on GitHub Actions and stream it here.
+                        --ref BRANCH branch to run on (default current)
+                        (needs 'recursive ci' committed once; gh or GITHUB_TOKEN)
+ watch [runId]       Follow a run live in this terminal. No id = latest run.
+                        Ctrl-C detaches; the run keeps going in the cloud.
 
 REPAIR. Tier 1: change the code until the flow actually passes
  login [url]         Connect this terminal to your dashboard account (shared model, no key here).
@@ -895,6 +905,213 @@ async function cmdExport(): Promise<void> {
   }
 }
 
+// ------------------------------------------------------------ cloud / watch
+
+interface WatchRun {
+  id: string;
+  kind: string;
+  status: string;
+  trigger: string;
+  startedAt: string;
+}
+interface WatchEvent {
+  seq: number;
+  at: string;
+  stage: string;
+  type: string;
+  message: string;
+  durationMs: number | null;
+}
+
+const TERMINAL_STATUS = new Set(["succeeded", "failed", "aborted"]);
+
+/** Pick the run to watch: an explicit id, else the most recent still-running. */
+async function pickRun(
+  creds: { apiUrl: string; token: string },
+  explicit: string | undefined,
+): Promise<string | undefined> {
+  if (explicit) return explicit;
+  try {
+    const res = await fetch(`${creds.apiUrl}/api/runs`, {
+      headers: { Authorization: `Bearer ${creds.token}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return undefined;
+    const data = (await res.json()) as { runs?: WatchRun[] };
+    const runs = data.runs ?? [];
+    return (runs.find((r) => !TERMINAL_STATUS.has(r.status)) ?? runs[0])?.id;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `recursive watch [runId]` — stream a run into this terminal.
+ *
+ * This is the "you can see it's really Recursive" surface. It polls the run's
+ * events with `?since=` and prints them as they land, so a cloud run on GitHub's
+ * servers reads exactly like a local one — and closing the terminal doesn't stop
+ * anything, because the run isn't here.
+ */
+async function cmdWatch(): Promise<void> {
+  const creds = loadCredentials();
+  if (!creds) {
+    console.error("Not logged in. Run `recursive login` first.");
+    process.exit(1);
+  }
+
+  // Give the caller a moment: `cloud`/`--detach` hand off to watch before the
+  // run has necessarily registered. Poll for it for up to ~90s.
+  let runId = process.argv[3] && !process.argv[3].startsWith("--") ? process.argv[3] : undefined;
+  const waitUntil = Date.now() + 90_000;
+  while (!runId) {
+    runId = await pickRun(creds, undefined);
+    if (runId) break;
+    if (Date.now() > waitUntil) {
+      console.error("No run to watch yet. Start one, or pass a run id.");
+      process.exit(1);
+    }
+    await sleep(2_000);
+  }
+
+  console.log(`\n  watching run ${runId}   (Ctrl-C to detach; the run keeps going)\n`);
+
+  let since = -1;
+  let idleStatus = "";
+  const deadline = Date.now() + 30 * 60_000; // safety cap
+  for (;;) {
+    let payload: { run?: WatchRun; events?: WatchEvent[] } | undefined;
+    try {
+      const res = await fetch(`${creds.apiUrl}/api/runs/${runId}?since=${since}`, {
+        headers: { Authorization: `Bearer ${creds.token}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (res.status === 404) {
+        // Not registered yet (cloud runner still booting).
+        await sleep(2_000);
+        continue;
+      }
+      if (res.ok) payload = (await res.json()) as { run?: WatchRun; events?: WatchEvent[] };
+    } catch {
+      /* transient; retry */
+    }
+
+    for (const e of payload?.events ?? []) {
+      since = Math.max(since, e.seq);
+      const dur = e.durationMs != null ? ` (${(e.durationMs / 1000).toFixed(1)}s)` : "";
+      console.log(`  ${e.stage.padEnd(10)} ${e.message}${dur}`);
+    }
+
+    const status = payload?.run?.status ?? idleStatus;
+    idleStatus = status;
+    if (status && TERMINAL_STATUS.has(status)) {
+      console.log(`\n  run ${status}.\n`);
+      return;
+    }
+    if (Date.now() > deadline) {
+      console.log(`\n  (stopped watching after 30m; run may still be going — \`recursive watch ${runId}\`)\n`);
+      return;
+    }
+    await sleep(1_500);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** The GitHub "owner/repo" for the current checkout, from its origin remote. */
+function githubSlug(repoPath: string): string | undefined {
+  try {
+    const url = execSync("git config --get remote.origin.url", { cwd: repoPath })
+      .toString()
+      .trim();
+    const m = /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec(url);
+    return m?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `recursive cloud` — run on GitHub's servers, not this laptop.
+ *
+ * Dispatches the Recursive workflow (written by `recursive ci`) so the sweep and
+ * repair happen in the cloud. The run streams back automatically — GitHub sets
+ * CI, which turns on live recording — so we hand straight off to `watch`. You
+ * can close the lid; nothing here is doing the work.
+ */
+async function cmdCloud(): Promise<void> {
+  const repoPath = arg("repo") ?? process.cwd();
+  const creds = loadCredentials();
+  if (!creds) {
+    console.error("Not logged in. Run `recursive login` first (the cloud run reports to your account).");
+    process.exit(1);
+  }
+
+  const slug = githubSlug(repoPath);
+  if (!slug) {
+    console.error("No GitHub origin remote found. `recursive cloud` runs on GitHub Actions.");
+    process.exit(1);
+  }
+
+  const fs = await import("node:fs");
+  if (!fs.existsSync(resolve(repoPath, ".github/workflows/recursive.yml"))) {
+    console.error("No .github/workflows/recursive.yml. Run `recursive ci` first, then commit it.");
+    process.exit(1);
+  }
+
+  const ref = arg("ref") ?? currentBranch(repoPath) ?? "main";
+  console.log(`\n  dispatching Recursive on GitHub → ${slug} @ ${ref}\n`);
+
+  // Prefer the gh CLI (uses the user's existing GitHub auth); fall back to the
+  // REST dispatch API with a token if gh isn't installed.
+  let dispatched = false;
+  try {
+    execSync(`gh workflow run recursive.yml --ref ${ref}`, { cwd: repoPath, stdio: "pipe" });
+    dispatched = true;
+  } catch {
+    const token = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"];
+    if (token) {
+      const res = await fetch(
+        `https://api.github.com/repos/${slug}/actions/workflows/recursive.yml/dispatches`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "application/vnd.github+json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ ref }),
+          signal: AbortSignal.timeout(15_000),
+        },
+      );
+      dispatched = res.ok || res.status === 204;
+      if (!dispatched) console.error(`  GitHub dispatch failed (${res.status}).`);
+    }
+  }
+
+  if (!dispatched) {
+    console.error(
+      "  Could not dispatch. Install the `gh` CLI (`gh auth login`), or set GITHUB_TOKEN, then retry.\n" +
+        "  You can also trigger it from the repo's Actions tab → Recursive → Run workflow.",
+    );
+    process.exit(1);
+  }
+
+  console.log("  ✓ dispatched. GitHub is spinning up a runner (~30–60s). Streaming here as it starts…");
+  console.log("    (safe to Ctrl-C — the run continues in the cloud.)");
+  await cmdWatch();
+}
+
+function currentBranch(repoPath: string): string | undefined {
+  try {
+    return execSync("git rev-parse --abbrev-ref HEAD", { cwd: repoPath }).toString().trim();
+  } catch {
+    return undefined;
+  }
+}
+
 async function cmdStatus(): Promise<void> {
   const b = budget.state();
   console.log(`\nClarity API budget   ${b.remaining}/${b.limit} remaining today (${b.date} UTC)`);
@@ -1094,6 +1311,25 @@ async function cmdSweep(): Promise<void> {
   if (!repoPath) {
     console.error("Set --repo or TARGET_REPO_PATH.");
     process.exit(1);
+  }
+
+  // `--detach`: run the sweep as a background process and return the terminal
+  // immediately, so you can keep working while it goes. It streams to the
+  // dashboard (RECURSIVE_STREAM=1), so `recursive watch` follows it, and it
+  // survives this shell closing.
+  if (flag("detach")) {
+    const { spawn } = await import("node:child_process");
+    const childArgs = process.argv.slice(2).filter((a) => a !== "--detach");
+    const child = spawn(process.execPath, [...process.execArgv, process.argv[1]!, ...childArgs], {
+      cwd: process.cwd(),
+      env: { ...process.env, RECURSIVE_STREAM: "1" },
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    console.log(`\n  ✓ sweep running in the background (pid ${child.pid}).`);
+    console.log(`  Keep working — follow it any time with:  recursive watch\n`);
+    return;
   }
 
   if (sub === "init") {
@@ -1588,6 +1824,10 @@ async function main(): Promise<void> {
     case "doctor":
       await cmdDoctor();
       break;
+    case "cloud":
+      return cmdCloud();
+    case "watch":
+      return cmdWatch();
     case "status":
       return cmdStatus();
     default:

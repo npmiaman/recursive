@@ -1,6 +1,27 @@
 import { NextResponse } from "next/server";
-import { insertRun } from "@/lib/db";
+import { insertRun, listRuns } from "@/lib/db";
 import { accountFromAuthHeader } from "@/lib/session";
+
+/**
+ * Recent runs for this account. `recursive watch` with no id calls this to find
+ * the run to attach to — the most recent one still running, else the latest.
+ */
+export async function GET(request: Request) {
+  const account = await accountFromAuthHeader(request.headers.get("authorization"));
+  if (!account) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const runs = await listRuns(account.id, 25);
+  return NextResponse.json({
+    runs: runs.map((r) => ({
+      id: r.id,
+      kind: r.kind,
+      status: r.status,
+      trigger: r.trigger,
+      startedAt: r.startedAt,
+      durationMs: r.durationMs,
+    })),
+  });
+}
 
 /** Run ingestion. The CLI uploads finished runs here. */
 export async function POST(request: Request) {

@@ -427,6 +427,8 @@ export async function repairFlow(options: RepairOptions): Promise<RepairResult> 
     prUrl,
     failureReason: loop.resolved ? undefined : loop.handoff?.reason,
   });
+  // Push the closing status to any live `watch` before the slower final flush.
+  await recorder.drainLive().catch(() => {});
 
   // Contribute back to the pool: a verified fix becomes a learning the next
   // team inherits. Only on success, and only the pattern + approach, never code.

@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start -p 4400",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --no-warnings test/db.test.ts"
+    "test": "node --experimental-strip-types --no-warnings test/db.test.ts && node --experimental-strip-types --no-warnings test/runs.test.ts"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.4",

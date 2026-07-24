@@ -35,12 +35,28 @@ function runsDir(): string {
   return dir;
 }
 
+/**
+ * Live streaming is opt-in per run, and only ever a mirror of the on-disk log.
+ * On when the run asks for it (RECURSIVE_STREAM=1, which `watch`/`cloud`/`--detach`
+ * set) or under CI (a cloud run is watched by definition), and only if logged in.
+ */
+function liveTarget(): { apiUrl: string; token: string } | undefined {
+  const wants = process.env["RECURSIVE_STREAM"] === "1" || !!process.env["CI"];
+  if (!wants) return undefined;
+  const credentials = loadCredentials();
+  if (!credentials) return undefined;
+  return { apiUrl: credentials.apiUrl, token: credentials.token };
+}
+
 export class Recorder {
   private run: Run;
   private events: RunEvent[] = [];
   private seq = 0;
   private stageStarted = new Map<Stage, number>();
   private path: string;
+  private live?: { apiUrl: string; token: string };
+  private pending: RunEvent[] = [];
+  private pumpPromise?: Promise<void>;
 
   constructor(input: {
     kind: RunKind;
@@ -50,6 +66,7 @@ export class Recorder {
     repo?: Run["repo"];
   }) {
     const credentials = loadCredentials();
+    this.live = liveTarget();
     this.run = {
       id: randomUUID(),
       accountId: credentials?.accountId ?? "local",
@@ -99,6 +116,58 @@ export class Recorder {
     };
     this.events.push(event);
     this.write({ type: "event", event });
+    if (this.live) {
+      this.pending.push(event);
+      this.wake();
+    }
+  }
+
+  /**
+   * Ensure a single pump loop is running. Concurrent callers share the one
+   * in-flight promise rather than starting a second, racing loop.
+   */
+  private wake(): void {
+    if (!this.live || this.pumpPromise) return;
+    this.pumpPromise = this.pump().finally(() => {
+      this.pumpPromise = undefined;
+    });
+  }
+
+  /**
+   * Drain buffered events to the dashboard so `watch` sees them in near real
+   * time. Best-effort: a failed push drops the batch from the LIVE view only —
+   * every event is still on disk and `flushRuns` delivers the complete run at
+   * the end, so the authoritative record is never lossy.
+   */
+  private async pump(): Promise<void> {
+    while (this.live && this.pending.length) {
+      const batch = this.pending.splice(0, this.pending.length);
+      try {
+        await fetch(`${this.live.apiUrl}/api/runs/${this.run.id}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.live.token}`,
+          },
+          body: JSON.stringify({ run: this.run, events: batch }),
+          signal: AbortSignal.timeout(8_000),
+        });
+      } catch {
+        // Network blip: the on-disk log + flushRuns remain the source of truth.
+      }
+    }
+  }
+
+  /**
+   * Await delivery of everything buffered so far. Loops because an event can
+   * arrive after the pump's last drain but before it settles; keep pumping until
+   * nothing is pending and no push is in flight. Callers use this before exit.
+   */
+  async drainLive(): Promise<void> {
+    while (this.live && (this.pending.length || this.pumpPromise)) {
+      this.wake();
+      await this.pumpPromise;
+    }
   }
 
   /** Mark the start of a stage so subsequent events carry a duration. */
